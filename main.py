@@ -290,7 +290,7 @@ class ModernApp(QMainWindow):
         left_layout.addLayout(model_row)
 
         self.minimax_model = QComboBox()
-        self.minimax_model.addItems(["agent-minimax", "agent-minimax-lite"])
+        self.minimax_model.addItems(["agente-minimax", "agente-minimax-lite"])
         left_layout.addWidget(self.minimax_model)
 
         actions = QHBoxLayout()
