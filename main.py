@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
 
 
 OLLAMA_URL = "http://localhost:11434"
+OLLAMA_TIMEOUT = 600  # segundos; modelos grandes o con imágenes pueden tardar más de 180s
 
 CSS = """
 QMainWindow {
@@ -197,12 +199,16 @@ class ImageDropZone(QFrame):
 class OllamaWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
+    chunk = Signal(str)
+    status = Signal(str)
 
     @Slot(str, str, object)
     def run(self, model_name, prompt, image_paths):
         try:
             image_paths = image_paths or []
             images = []
+            if image_paths:
+                self.status.emit(f"Codificando {len(image_paths)} imagen(es)...")
             for image_path in image_paths:
                 with open(image_path, "rb") as f:
                     images.append(base64.b64encode(f.read()).decode("utf-8"))
@@ -214,14 +220,40 @@ class OllamaWorker(QObject):
                     "content": prompt,
                     "images": images,
                 }],
-                "stream": False,
+                "stream": True,
             }
-            response = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=180)
+            self.status.emit(f"Conectando con el modelo '{model_name}'...")
+            response = requests.post(
+                f"{OLLAMA_URL}/api/chat", json=payload, timeout=OLLAMA_TIMEOUT, stream=True
+            )
             response.raise_for_status()
-            body = response.json()
-            if "message" not in body or "content" not in body["message"]:
+            self.status.emit("Generando respuesta...")
+            full_text = ""
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                body = json.loads(line)
+                if body.get("error"):
+                    raise ValueError(body["error"])
+                delta = body.get("message", {}).get("content", "")
+                if delta:
+                    full_text += delta
+                    self.chunk.emit(delta)
+                if body.get("done"):
+                    break
+            if not full_text:
                 raise ValueError("La respuesta de Ollama no tiene el formato esperado.")
-            self.finished.emit(body["message"]["content"].strip())
+            self.finished.emit(full_text.strip())
+        except requests.exceptions.ReadTimeout:
+            self.failed.emit(
+                f"Ollama tardó más de {OLLAMA_TIMEOUT} segundos en responder. "
+                "El modelo puede ser muy grande o la máquina no tiene suficientes recursos (GPU/RAM). "
+                "Prueba con un modelo más pequeño o espera a que Ollama termine de cargarlo."
+            )
+        except requests.exceptions.ConnectionError:
+            self.failed.emit(
+                "No se pudo conectar con Ollama en http://localhost:11434. Comprueba que el servidor esté activo."
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -634,6 +666,8 @@ class ModernApp(QMainWindow):
         worker.moveToThread(worker_thread)
         worker.finished.connect(self._handle_background_result)
         worker.failed.connect(self._handle_background_error)
+        worker.chunk.connect(self._handle_background_chunk)
+        worker.status.connect(self._handle_background_status)
         worker_thread.started.connect(lambda: worker.run(model_name, prompt, image_paths))
         worker.finished.connect(worker_thread.quit)
         worker.failed.connect(worker_thread.quit)
@@ -641,8 +675,27 @@ class ModernApp(QMainWindow):
         worker.failed.connect(worker.deleteLater)
         worker_thread.finished.connect(worker_thread.deleteLater)
         self._active_task = (target_key, worker_thread)
+        if target_key == "minimax":
+            self.minimax_output.setPlainText("")
+        elif target_key == "vision":
+            self.vision_output.setPlainText("")
         self._set_busy("Procesando solicitud...", True)
         worker_thread.start()
+
+    def _handle_background_chunk(self, delta):
+        if not self._active_task:
+            return
+        target_key = self._active_task[0]
+        output_box = self.minimax_output if target_key == "minimax" else self.vision_output
+        cursor = output_box.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        output_box.setTextCursor(cursor)
+        output_box.insertPlainText(delta)
+        output_box.ensureCursorVisible()
+
+    def _handle_background_status(self, message):
+        self.current_busy_text = message
+        self.statusBar().showMessage(f"Procesando: {message}")
 
     def _handle_background_result(self, result):
         target_key = self._active_task[0]
@@ -653,6 +706,7 @@ class ModernApp(QMainWindow):
         elif target_key == "vision":
             self.vision_output.setPlainText(result)
             self.statusBar().showMessage("Descripción visual generada.")
+        QApplication.beep()
         self._active_task = None
 
     def _handle_background_error(self, error_text):
