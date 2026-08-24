@@ -2,6 +2,8 @@ import base64
 import json
 import os
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -14,6 +16,8 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -31,6 +35,35 @@ from PySide6.QtWidgets import (
 
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_TIMEOUT = 600  # segundos; modelos grandes o con imágenes pueden tardar más de 180s
+HISTORY_MAX_ENTRIES = 200
+
+
+def get_minimax_history_path():
+    base = os.getenv("APPDATA") or str(Path.home())
+    folder = Path(base) / "MiniMaxPromptStudio"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / "minimax_history.json"
+
+
+def load_minimax_history():
+    path = get_minimax_history_path()
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_minimax_history(entries):
+    path = get_minimax_history_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 CSS = """
 QMainWindow {
@@ -259,10 +292,13 @@ class OllamaWorker(QObject):
 
 
 class ModernApp(QMainWindow):
+    start_ollama_task = Signal(str, str, object)
+
     def __init__(self):
         super().__init__()
         self.selected_minimax_images = []
         self.selected_vision_image = ""
+        self.minimax_history = load_minimax_history()
         self.setWindowTitle("MiniMax + Vision Studio")
         self.resize(1180, 820)
         self.setMinimumSize(980, 720)
@@ -295,9 +331,13 @@ class ModernApp(QMainWindow):
 
     def _build_minimax_tab(self):
         container = QWidget()
-        outer = QHBoxLayout(container)
-        outer.setContentsMargins(20, 18, 20, 18)
+        main_layout = QVBoxLayout(container)
+        main_layout.setContentsMargins(20, 18, 20, 18)
+        main_layout.setSpacing(14)
+
+        outer = QHBoxLayout()
         outer.setSpacing(18)
+        main_layout.addLayout(outer)
 
         left_card = QFrame()
         left_card.setObjectName("card")
@@ -383,6 +423,47 @@ class ModernApp(QMainWindow):
         left_card.setFixedWidth(540)
         outer.addWidget(left_card)
         outer.addWidget(right_card)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(18)
+        main_layout.addLayout(bottom_row)
+
+        log_card = QFrame()
+        log_card.setObjectName("card")
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(18, 14, 18, 14)
+        log_layout.setSpacing(8)
+
+        log_title = QLabel("Registro en tiempo real")
+        log_title.setObjectName("section-title")
+        log_layout.addWidget(log_title)
+
+        self.minimax_log = QPlainTextEdit()
+        self.minimax_log.setReadOnly(True)
+        self.minimax_log.setPlaceholderText("Aquí verás el progreso de la generación...")
+        self.minimax_log.setMaximumHeight(150)
+        self.minimax_log.setStyleSheet("QPlainTextEdit { font-family: Consolas, monospace; font-size: 11px; }")
+        log_layout.addWidget(self.minimax_log)
+
+        history_card = QFrame()
+        history_card.setObjectName("card")
+        history_layout = QVBoxLayout(history_card)
+        history_layout.setContentsMargins(18, 14, 18, 14)
+        history_layout.setSpacing(8)
+
+        history_title = QLabel("Historial de prompts")
+        history_title.setObjectName("section-title")
+        history_layout.addWidget(history_title)
+
+        self.minimax_history_list = QListWidget()
+        self.minimax_history_list.setMaximumHeight(150)
+        self.minimax_history_list.itemClicked.connect(self._load_minimax_history_item)
+        history_layout.addWidget(self.minimax_history_list)
+        self._refresh_minimax_history_list()
+
+        bottom_row.addWidget(log_card, 1)
+        bottom_row.addWidget(history_card, 1)
+
         return container
 
     def _build_vision_tab(self):
@@ -664,23 +745,30 @@ class ModernApp(QMainWindow):
         worker_thread = QThread(self)
         worker = OllamaWorker()
         worker.moveToThread(worker_thread)
+        self.start_ollama_task.connect(worker.run, Qt.QueuedConnection)
         worker.finished.connect(self._handle_background_result)
         worker.failed.connect(self._handle_background_error)
         worker.chunk.connect(self._handle_background_chunk)
         worker.status.connect(self._handle_background_status)
-        worker_thread.started.connect(lambda: worker.run(model_name, prompt, image_paths))
         worker.finished.connect(worker_thread.quit)
         worker.failed.connect(worker_thread.quit)
         worker.finished.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
         worker_thread.finished.connect(worker_thread.deleteLater)
         self._active_task = (target_key, worker_thread)
+        self._minimax_chunk_chars = 0
         if target_key == "minimax":
             self.minimax_output.setPlainText("")
+            self._append_minimax_log(f"Solicitud iniciada con el modelo '{model_name}'.")
         elif target_key == "vision":
             self.vision_output.setPlainText("")
         self._set_busy("Procesando solicitud...", True)
         worker_thread.start()
+        self.start_ollama_task.emit(model_name, prompt, image_paths)
+
+    def _append_minimax_log(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.minimax_log.appendPlainText(f"[{timestamp}] {message}")
 
     def _handle_background_chunk(self, delta):
         if not self._active_task:
@@ -692,10 +780,14 @@ class ModernApp(QMainWindow):
         output_box.setTextCursor(cursor)
         output_box.insertPlainText(delta)
         output_box.ensureCursorVisible()
+        if target_key == "minimax":
+            self._minimax_chunk_chars += len(delta)
 
     def _handle_background_status(self, message):
         self.current_busy_text = message
         self.statusBar().showMessage(f"Procesando: {message}")
+        if self._active_task and self._active_task[0] == "minimax":
+            self._append_minimax_log(message)
 
     def _handle_background_result(self, result):
         target_key = self._active_task[0]
@@ -703,6 +795,8 @@ class ModernApp(QMainWindow):
         if target_key == "minimax":
             self.minimax_output.setPlainText(result)
             self.statusBar().showMessage("Prompt generado con MiniMax H3.")
+            self._append_minimax_log(f"Completado. {len(result)} caracteres generados.")
+            self._save_minimax_history_entry(result)
         elif target_key == "vision":
             self.vision_output.setPlainText(result)
             self.statusBar().showMessage("Descripción visual generada.")
@@ -714,10 +808,45 @@ class ModernApp(QMainWindow):
         if self._active_task and self._active_task[0] == "minimax":
             QMessageBox.critical(self, "Error al generar el prompt", f"No se pudo generar el prompt:\n{error_text}")
             self.statusBar().showMessage("Error al comunicarse con Ollama.")
+            self._append_minimax_log(f"ERROR: {error_text}")
         elif self._active_task and self._active_task[0] == "vision":
             QMessageBox.critical(self, "Error al describir la imagen", f"No se pudo describir la imagen:\n{error_text}")
             self.statusBar().showMessage("Error al comunicarse con el modelo de visión.")
         self._active_task = None
+
+    def _save_minimax_history_entry(self, output_text):
+        entry = {
+            "id": str(uuid.uuid4()),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "model": self.minimax_model.currentText(),
+            "input": self.minimax_input.toPlainText(),
+            "output": output_text,
+        }
+        self.minimax_history.insert(0, entry)
+        del self.minimax_history[HISTORY_MAX_ENTRIES:]
+        save_minimax_history(self.minimax_history)
+        self._refresh_minimax_history_list()
+
+    def _refresh_minimax_history_list(self):
+        self.minimax_history_list.clear()
+        for entry in self.minimax_history:
+            preview = entry.get("input", "").strip().replace("\n", " ")
+            if len(preview) > 60:
+                preview = preview[:60] + "…"
+            if not preview:
+                preview = "(sin texto de entrada)"
+            item = QListWidgetItem(f"{entry.get('timestamp', '')} — {preview}")
+            item.setData(Qt.UserRole, entry.get("id"))
+            self.minimax_history_list.addItem(item)
+
+    def _load_minimax_history_item(self, item):
+        entry_id = item.data(Qt.UserRole)
+        entry = next((e for e in self.minimax_history if e.get("id") == entry_id), None)
+        if not entry:
+            return
+        self.minimax_input.setPlainText(entry.get("input", ""))
+        self.minimax_output.setPlainText(entry.get("output", ""))
+        self.statusBar().showMessage("Prompt del historial cargado (sin imágenes).")
 
     def encode_image(self, image_path):
         with open(image_path, "rb") as f:
@@ -728,6 +857,8 @@ class ModernApp(QMainWindow):
         if not text_input and not self.selected_minimax_images:
             QMessageBox.warning(self, "Falta contenido", "Añade texto o al menos una imagen antes de generar el prompt.")
             return
+
+        self.minimax_log.clear()
 
         prompt = (
             "Act as an expert prompt engineer for MiniMax H3. "
