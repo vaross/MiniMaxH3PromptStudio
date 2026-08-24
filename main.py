@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QWidget,
     QComboBox,
     QButtonGroup,
+    QSplitter,
+    QDockWidget,
 )
 
 
@@ -332,8 +334,8 @@ class ModernApp(QMainWindow):
         self.selected_vision_image = ""
         self.minimax_history = load_minimax_history()
         self.setWindowTitle("MiniMax + Vision Studio")
-        self.resize(1180, 820)
-        self.setMinimumSize(980, 720)
+        self.resize(1400, 900)
+        self.setMinimumSize(1024, 768)
         self.setStyleSheet(CSS)
         self._set_window_icon()
 
@@ -346,6 +348,8 @@ class ModernApp(QMainWindow):
         self.tabs.addTab(self._build_minimax_tab(), "MiniMax H3")
         self.tabs.addTab(self._build_vision_tab(), "Descripción visual")
         self.setCentralWidget(self.tabs)
+
+        self._setup_history_dock()
 
         self.current_busy_text = ""
         self.spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -365,15 +369,30 @@ class ModernApp(QMainWindow):
             from PySide6.QtGui import QIcon
             self.setWindowIcon(QIcon(str(icon_path)))
 
+    def _setup_history_dock(self):
+        dock = QDockWidget("Historial de prompts", self)
+        dock.setObjectName("HistoryDock")
+        dock_widget = QWidget()
+        dock_layout = QVBoxLayout(dock_widget)
+        dock_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.minimax_history_list = QListWidget()
+        self.minimax_history_list.itemClicked.connect(self._load_minimax_history_item)
+        dock_layout.addWidget(self.minimax_history_list)
+
+        dock.setWidget(dock_widget)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self._refresh_minimax_history_list()
+
     def _build_minimax_tab(self):
         container = QWidget()
         main_layout = QVBoxLayout(container)
-        main_layout.setContentsMargins(20, 18, 20, 18)
-        main_layout.setSpacing(14)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(12)
 
-        outer = QHBoxLayout()
-        outer.setSpacing(18)
-        main_layout.addLayout(outer)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
 
         left_card = QFrame()
         left_card.setObjectName("card")
@@ -387,8 +406,8 @@ class ModernApp(QMainWindow):
 
         self.minimax_input = QPlainTextEdit()
         self.minimax_input.setPlaceholderText("Describe el objetivo, contexto, tono y restricciones del prompt...")
-        self.minimax_input.setMinimumHeight(260)
-        left_layout.addWidget(self.minimax_input)
+        self.minimax_input.setMinimumHeight(220)
+        left_layout.addWidget(self.minimax_input, 1)
 
         model_row = QHBoxLayout()
         model_row.setSpacing(12)
@@ -403,7 +422,7 @@ class ModernApp(QMainWindow):
         left_layout.addWidget(self.minimax_model)
 
         actions = QHBoxLayout()
-        actions.setSpacing(10)
+        actions.setSpacing(8)
         btn_images = QPushButton("Cargar imágenes")
         btn_images.clicked.connect(self.select_minimax_images)
         btn_clear = QPushButton("Eliminar todo")
@@ -443,7 +462,7 @@ class ModernApp(QMainWindow):
         self.minimax_preview_container = preview_panel
         self.minimax_preview_layout = preview_layout
         self._render_minimax_preview_empty()
-        right_layout.addWidget(preview_panel)
+        right_layout.addWidget(preview_panel, 1)
 
         output_title = QLabel("Prompt generado")
         output_title.setObjectName("section-title")
@@ -451,8 +470,8 @@ class ModernApp(QMainWindow):
 
         self.minimax_output = QPlainTextEdit()
         self.minimax_output.setPlaceholderText("Tu prompt final aparecerá aquí...")
-        self.minimax_output.setMinimumHeight(220)
-        right_layout.addWidget(self.minimax_output)
+        self.minimax_output.setMinimumHeight(180)
+        right_layout.addWidget(self.minimax_output, 1)
 
         copy_row = QHBoxLayout()
         copy_row.addStretch()
@@ -461,13 +480,10 @@ class ModernApp(QMainWindow):
         copy_row.addWidget(btn_copy)
         right_layout.addLayout(copy_row)
 
-        left_card.setFixedWidth(540)
-        outer.addWidget(left_card)
-        outer.addWidget(right_card)
-
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(18)
-        main_layout.addLayout(bottom_row)
+        splitter.addWidget(left_card)
+        splitter.addWidget(right_card)
+        splitter.setSizes([400, 600])
+        main_layout.addWidget(splitter, 1)
 
         log_card = QFrame()
         log_card.setObjectName("card")
@@ -482,36 +498,19 @@ class ModernApp(QMainWindow):
         self.minimax_log = QPlainTextEdit()
         self.minimax_log.setReadOnly(True)
         self.minimax_log.setPlaceholderText("Aquí verás el progreso de la generación...")
-        self.minimax_log.setMaximumHeight(150)
+        self.minimax_log.setMaximumHeight(120)
         self.minimax_log.setStyleSheet("QPlainTextEdit { font-family: Consolas, monospace; font-size: 11px; }")
         log_layout.addWidget(self.minimax_log)
 
-        history_card = QFrame()
-        history_card.setObjectName("card")
-        history_layout = QVBoxLayout(history_card)
-        history_layout.setContentsMargins(18, 14, 18, 14)
-        history_layout.setSpacing(8)
-
-        history_title = QLabel("Historial de prompts")
-        history_title.setObjectName("section-title")
-        history_layout.addWidget(history_title)
-
-        self.minimax_history_list = QListWidget()
-        self.minimax_history_list.setMaximumHeight(150)
-        self.minimax_history_list.itemClicked.connect(self._load_minimax_history_item)
-        history_layout.addWidget(self.minimax_history_list)
-        self._refresh_minimax_history_list()
-
-        bottom_row.addWidget(log_card, 1)
-        bottom_row.addWidget(history_card, 1)
+        main_layout.addWidget(log_card, 0)
 
         return container
 
     def _build_vision_tab(self):
         container = QWidget()
         outer = QHBoxLayout(container)
-        outer.setContentsMargins(20, 18, 20, 18)
-        outer.setSpacing(18)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(12)
 
         left_card = QFrame()
         left_card.setObjectName("card")
@@ -552,11 +551,11 @@ class ModernApp(QMainWindow):
 
         self.vision_prompt = QPlainTextEdit()
         self.vision_prompt.setPlaceholderText("Añade instrucciones adicionales para la descripción...")
-        self.vision_prompt.setMaximumHeight(120)
+        self.vision_prompt.setMaximumHeight(140)
         left_layout.addWidget(self.vision_prompt)
 
         actions = QHBoxLayout()
-        actions.setSpacing(10)
+        actions.setSpacing(8)
         btn_load = QPushButton("Cargar imagen")
         btn_load.clicked.connect(self.select_vision_image)
         btn_generate = QPushButton("Generar descripción")
@@ -571,6 +570,9 @@ class ModernApp(QMainWindow):
         actions.addWidget(btn_generate)
         actions.addWidget(self.stop_button_vision)
         left_layout.addLayout(actions)
+
+        left_layout.addStretch()
+        left_card.setMaximumWidth(380)
 
         right_card = QFrame()
         right_card.setObjectName("card")
@@ -589,12 +591,12 @@ class ModernApp(QMainWindow):
         self.vision_preview_label = QLabel("Arrastra una imagen aquí o cárgala desde el botón")
         self.vision_preview_label.setObjectName("preview-empty")
         self.vision_preview_label.setAlignment(Qt.AlignCenter)
-        self.vision_preview_label.setMinimumHeight(320)
+        self.vision_preview_label.setMinimumHeight(300)
         self.vision_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.vision_preview_label.setWordWrap(True)
         preview_layout.addWidget(self.vision_preview_label)
         preview_panel.dropped.connect(self.handle_vision_drop)
-        right_layout.addWidget(preview_panel)
+        right_layout.addWidget(preview_panel, 1)
 
         output_title = QLabel("Descripción generada")
         output_title.setObjectName("section-title")
@@ -602,8 +604,8 @@ class ModernApp(QMainWindow):
 
         self.vision_output = QPlainTextEdit()
         self.vision_output.setPlaceholderText("La descripción saldrá aquí...")
-        self.vision_output.setMinimumHeight(220)
-        right_layout.addWidget(self.vision_output)
+        self.vision_output.setMinimumHeight(180)
+        right_layout.addWidget(self.vision_output, 1)
 
         copy_row = QHBoxLayout()
         copy_row.addStretch()
@@ -612,9 +614,8 @@ class ModernApp(QMainWindow):
         copy_row.addWidget(btn_copy)
         right_layout.addLayout(copy_row)
 
-        left_card.setFixedWidth(440)
-        outer.addWidget(left_card)
-        outer.addWidget(right_card)
+        outer.addWidget(left_card, 0)
+        outer.addWidget(right_card, 1)
         return container
 
     def _render_minimax_preview_empty(self):
