@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
 
 
 OLLAMA_URL = "http://localhost:11434"
-OLLAMA_TIMEOUT = 600  # segundos; modelos grandes o con imágenes pueden tardar más de 180s
+OLLAMA_TIMEOUT_NORMAL = 600  # 10 minutos
+OLLAMA_TIMEOUT_HEAVY = 1800  # 30 minutos
 HISTORY_MAX_ENTRIES = 200
 
 
@@ -234,6 +235,18 @@ class OllamaWorker(QObject):
     failed = Signal(str)
     chunk = Signal(str)
     status = Signal(str)
+    stopped = Signal()
+
+    def __init__(self, timeout=OLLAMA_TIMEOUT_NORMAL):
+        super().__init__()
+        self.stop_requested = False
+        self.response = None
+        self.timeout = timeout
+
+    def request_stop(self):
+        self.stop_requested = True
+        if self.response:
+            self.response.close()
 
     @Slot(str, str, object)
     def run(self, model_name, prompt, image_paths):
@@ -242,6 +255,7 @@ class OllamaWorker(QObject):
             images = []
             if image_paths:
                 self.status.emit(f"Codificando {len(image_paths)} imagen(es)...")
+                print(f"[DEBUG] Encoding {len(image_paths)} images")
             for image_path in image_paths:
                 with open(image_path, "rb") as f:
                     images.append(base64.b64encode(f.read()).decode("utf-8"))
@@ -256,39 +270,57 @@ class OllamaWorker(QObject):
                 "stream": True,
             }
             self.status.emit(f"Conectando con el modelo '{model_name}'...")
-            response = requests.post(
-                f"{OLLAMA_URL}/api/chat", json=payload, timeout=OLLAMA_TIMEOUT, stream=True
+            print(f"[DEBUG] Connecting to model: {model_name}, timeout: {self.timeout}s")
+            self.response = requests.post(
+                f"{OLLAMA_URL}/api/chat", json=payload, timeout=self.timeout, stream=True
             )
-            response.raise_for_status()
+            self.response.raise_for_status()
             self.status.emit("Generando respuesta...")
+            print("[DEBUG] Generating response...")
             full_text = ""
-            for line in response.iter_lines(decode_unicode=True):
+            chunk_count = 0
+            for line in self.response.iter_lines(decode_unicode=True):
+                if self.stop_requested:
+                    print("[DEBUG] Stop requested")
+                    self.stopped.emit()
+                    return
                 if not line:
                     continue
-                body = json.loads(line)
+                try:
+                    body = json.loads(line)
+                except json.JSONDecodeError:
+                    print(f"[DEBUG] Invalid JSON line: {line}")
+                    continue
                 if body.get("error"):
                     raise ValueError(body["error"])
                 delta = body.get("message", {}).get("content", "")
                 if delta:
                     full_text += delta
+                    chunk_count += 1
+                    print(f"[DEBUG] Chunk {chunk_count}: {len(delta)} chars")
                     self.chunk.emit(delta)
                 if body.get("done"):
                     break
             if not full_text:
                 raise ValueError("La respuesta de Ollama no tiene el formato esperado.")
+            print(f"[DEBUG] Completed. Total: {len(full_text)} chars")
             self.finished.emit(full_text.strip())
         except requests.exceptions.ReadTimeout:
+            print("[DEBUG] Timeout")
             self.failed.emit(
-                f"Ollama tardó más de {OLLAMA_TIMEOUT} segundos en responder. "
+                f"Ollama tardó más de {self.timeout} segundos en responder. "
                 "El modelo puede ser muy grande o la máquina no tiene suficientes recursos (GPU/RAM). "
                 "Prueba con un modelo más pequeño o espera a que Ollama termine de cargarlo."
             )
         except requests.exceptions.ConnectionError:
+            print("[DEBUG] Connection error")
             self.failed.emit(
                 "No se pudo conectar con Ollama en http://localhost:11434. Comprueba que el servidor esté activo."
             )
         except Exception as exc:
-            self.failed.emit(str(exc))
+            print(f"[DEBUG] Exception: {exc}")
+            if not self.stop_requested:
+                self.failed.emit(str(exc))
 
 
 class ModernApp(QMainWindow):
@@ -304,6 +336,10 @@ class ModernApp(QMainWindow):
         self.setMinimumSize(980, 720)
         self.setStyleSheet(CSS)
         self._set_window_icon()
+
+        self._active_task = None
+        self.stop_button_minimax = None
+        self.stop_button_vision = None
 
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(True)
@@ -376,11 +412,16 @@ class ModernApp(QMainWindow):
         btn_generate = QPushButton("Generar prompt")
         btn_generate.setObjectName("primary-button")
         btn_generate.clicked.connect(self.generate_minimax_prompt)
+        self.stop_button_minimax = QPushButton("Parar")
+        self.stop_button_minimax.setObjectName("danger-button")
+        self.stop_button_minimax.setEnabled(False)
+        self.stop_button_minimax.clicked.connect(self.stop_execution)
 
         actions.addWidget(btn_images)
         actions.addWidget(btn_clear)
         actions.addStretch()
         actions.addWidget(btn_generate)
+        actions.addWidget(self.stop_button_minimax)
         left_layout.addLayout(actions)
 
         right_card = QFrame()
@@ -521,9 +562,14 @@ class ModernApp(QMainWindow):
         btn_generate = QPushButton("Generar descripción")
         btn_generate.setObjectName("primary-button")
         btn_generate.clicked.connect(self.generate_vision_description)
+        self.stop_button_vision = QPushButton("Parar")
+        self.stop_button_vision.setObjectName("danger-button")
+        self.stop_button_vision.setEnabled(False)
+        self.stop_button_vision.clicked.connect(self.stop_execution)
         actions.addWidget(btn_load)
         actions.addStretch()
         actions.addWidget(btn_generate)
+        actions.addWidget(self.stop_button_vision)
         left_layout.addLayout(actions)
 
         right_card = QFrame()
@@ -731,6 +777,8 @@ class ModernApp(QMainWindow):
         self.vision_prompt.setEnabled(not busy)
         self.vision_output.setEnabled(not busy)
         self.tabs.setEnabled(not busy)
+        self.stop_button_minimax.setEnabled(busy)
+        self.stop_button_vision.setEnabled(busy)
         if busy:
             self.spinner_timer.start(100)
             self._animate_spinner()
@@ -741,21 +789,36 @@ class ModernApp(QMainWindow):
             self.busy_spinner_label.setText("")
             self.statusBar().showMessage("Conectado con Ollama. Listo para usar.")
 
+    def stop_execution(self):
+        if self._active_task and len(self._active_task) >= 3:
+            target_key, worker_thread, worker = self._active_task[0], self._active_task[1], self._active_task[2]
+            if worker and hasattr(worker, 'request_stop'):
+                worker.request_stop()
+                self.statusBar().showMessage("Deteniendo ejecución...")
+
+    def _get_timeout_for_model(self, model_name):
+        heavy_models = ["agente-minimax", "Pro", "orcarouter/Qwen3.8-27B-Uncensored:latest"]
+        return OLLAMA_TIMEOUT_HEAVY if model_name in heavy_models else OLLAMA_TIMEOUT_NORMAL
+
     def _start_background_task(self, model_name, prompt, image_paths, target_key):
+        timeout = self._get_timeout_for_model(model_name)
         worker_thread = QThread(self)
-        worker = OllamaWorker()
+        worker = OllamaWorker(timeout=timeout)
         worker.moveToThread(worker_thread)
         self.start_ollama_task.connect(worker.run, Qt.QueuedConnection)
-        worker.finished.connect(self._handle_background_result)
-        worker.failed.connect(self._handle_background_error)
-        worker.chunk.connect(self._handle_background_chunk)
-        worker.status.connect(self._handle_background_status)
+        worker.finished.connect(self._handle_background_result, Qt.QueuedConnection)
+        worker.failed.connect(self._handle_background_error, Qt.QueuedConnection)
+        worker.chunk.connect(self._handle_background_chunk, Qt.QueuedConnection)
+        worker.status.connect(self._handle_background_status, Qt.QueuedConnection)
+        worker.stopped.connect(self._handle_execution_stopped, Qt.QueuedConnection)
         worker.finished.connect(worker_thread.quit)
         worker.failed.connect(worker_thread.quit)
+        worker.stopped.connect(worker_thread.quit)
         worker.finished.connect(worker.deleteLater)
         worker.failed.connect(worker.deleteLater)
+        worker.stopped.connect(worker.deleteLater)
         worker_thread.finished.connect(worker_thread.deleteLater)
-        self._active_task = (target_key, worker_thread)
+        self._active_task = (target_key, worker_thread, worker)
         self._minimax_chunk_chars = 0
         if target_key == "minimax":
             self.minimax_output.setPlainText("")
@@ -771,15 +834,23 @@ class ModernApp(QMainWindow):
         self.minimax_log.appendPlainText(f"[{timestamp}] {message}")
 
     def _handle_background_chunk(self, delta):
-        if not self._active_task:
+        if not self._active_task or not delta:
             return
         target_key = self._active_task[0]
-        output_box = self.minimax_output if target_key == "minimax" else self.vision_output
+        if target_key == "minimax":
+            output_box = self.minimax_output
+        elif target_key == "vision":
+            output_box = self.vision_output
+        else:
+            return
+
         cursor = output_box.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         output_box.setTextCursor(cursor)
         output_box.insertPlainText(delta)
         output_box.ensureCursorVisible()
+        QApplication.processEvents()
+
         if target_key == "minimax":
             self._minimax_chunk_chars += len(delta)
 
@@ -790,6 +861,8 @@ class ModernApp(QMainWindow):
             self._append_minimax_log(message)
 
     def _handle_background_result(self, result):
+        if not self._active_task:
+            return
         target_key = self._active_task[0]
         self._set_busy("", False)
         if target_key == "minimax":
@@ -812,6 +885,15 @@ class ModernApp(QMainWindow):
         elif self._active_task and self._active_task[0] == "vision":
             QMessageBox.critical(self, "Error al describir la imagen", f"No se pudo describir la imagen:\n{error_text}")
             self.statusBar().showMessage("Error al comunicarse con el modelo de visión.")
+        self._active_task = None
+
+    def _handle_execution_stopped(self):
+        self._set_busy("", False)
+        if self._active_task:
+            target_key = self._active_task[0]
+            if target_key == "minimax":
+                self._append_minimax_log("Ejecución detenida por el usuario.")
+            self.statusBar().showMessage("Ejecución detenida.")
         self._active_task = None
 
     def _save_minimax_history_entry(self, output_text):
@@ -869,7 +951,6 @@ class ModernApp(QMainWindow):
             f"User text:\n{text_input or 'No text was provided.'}"
         )
 
-        self._active_task = ("minimax", None)
         self._start_background_task(self.minimax_model.currentText(), prompt, self.selected_minimax_images, "minimax")
 
     def copy_minimax_output(self):
