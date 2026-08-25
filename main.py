@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 
 OLLAMA_URL = "http://localhost:11434"
+OLLAMA_URL_CLOUD = os.getenv("MODAL_OLLAMA_URL", "https://vilchesdiaz-alvaro--agente-minimax-h3-fastapi-app.modal.run")
 OLLAMA_TIMEOUT_NORMAL = 600  # 10 minutos
 OLLAMA_TIMEOUT_HEAVY = 1800  # 30 minutos
 HISTORY_MAX_ENTRIES = 200
@@ -239,11 +240,13 @@ class OllamaWorker(QObject):
     status = Signal(str)
     stopped = Signal()
 
-    def __init__(self, timeout=OLLAMA_TIMEOUT_NORMAL):
+    def __init__(self, timeout=OLLAMA_TIMEOUT_NORMAL, url=OLLAMA_URL, is_cloud=False):
         super().__init__()
         self.stop_requested = False
         self.response = None
         self.timeout = timeout
+        self.url = url
+        self.is_cloud = is_cloud
 
     def request_stop(self):
         self.stop_requested = True
@@ -262,67 +265,91 @@ class OllamaWorker(QObject):
                 with open(image_path, "rb") as f:
                     images.append(base64.b64encode(f.read()).decode("utf-8"))
 
-            payload = {
-                "model": model_name,
-                "messages": [{
-                    "role": "user",
-                    "content": prompt,
-                    "images": images,
-                }],
-                "stream": True,
-            }
-            self.status.emit(f"Conectando con el modelo '{model_name}'...")
-            print(f"[DEBUG] Connecting to model: {model_name}, timeout: {self.timeout}s")
-            self.response = requests.post(
-                f"{OLLAMA_URL}/api/chat", json=payload, timeout=self.timeout, stream=True
-            )
-            self.response.raise_for_status()
-            self.status.emit("Generando respuesta...")
-            print("[DEBUG] Generating response...")
-            full_text = ""
-            chunk_count = 0
-            for line in self.response.iter_lines(decode_unicode=True):
-                if self.stop_requested:
-                    print("[DEBUG] Stop requested")
-                    self.stopped.emit()
-                    return
-                if not line:
-                    continue
-                try:
-                    body = json.loads(line)
-                except json.JSONDecodeError:
-                    print(f"[DEBUG] Invalid JSON line: {line}")
-                    continue
-                if body.get("error"):
-                    raise ValueError(body["error"])
-                delta = body.get("message", {}).get("content", "")
-                if delta:
-                    full_text += delta
-                    chunk_count += 1
-                    print(f"[DEBUG] Chunk {chunk_count}: {len(delta)} chars")
-                    self.chunk.emit(delta)
-                if body.get("done"):
-                    break
-            if not full_text:
-                raise ValueError("La respuesta de Ollama no tiene el formato esperado.")
-            print(f"[DEBUG] Completed. Total: {len(full_text)} chars")
-            self.finished.emit(full_text.strip())
-        except requests.exceptions.ReadTimeout:
-            print("[DEBUG] Timeout")
-            self.failed.emit(
-                f"Ollama tardó más de {self.timeout} segundos en responder. "
-                "El modelo puede ser muy grande o la máquina no tiene suficientes recursos (GPU/RAM). "
-                "Prueba con un modelo más pequeño o espera a que Ollama termine de cargarlo."
-            )
-        except requests.exceptions.ConnectionError:
-            print("[DEBUG] Connection error")
-            self.failed.emit(
-                "No se pudo conectar con Ollama en http://localhost:11434. Comprueba que el servidor esté activo."
-            )
+            if self.is_cloud:
+                self._run_cloud(model_name, prompt, images)
+            else:
+                self._run_local(model_name, prompt, images)
         except Exception as exc:
             print(f"[DEBUG] Exception: {exc}")
             if not self.stop_requested:
                 self.failed.emit(str(exc))
+
+    def _run_local(self, model_name, prompt, images):
+        payload = {
+            "model": model_name,
+            "messages": [{
+                "role": "user",
+                "content": prompt,
+                "images": images,
+            }],
+            "stream": True,
+        }
+        self.status.emit(f"Conectando con el modelo '{model_name}'...")
+        print(f"[DEBUG] Connecting to {self.url}/api/chat, model: {model_name}, timeout: {self.timeout}s")
+        self.response = requests.post(
+            f"{self.url}/api/chat", json=payload, timeout=self.timeout, stream=True
+        )
+        self.response.raise_for_status()
+        self.status.emit("Generando respuesta...")
+        print("[DEBUG] Generating response...")
+        full_text = ""
+        chunk_count = 0
+        for line in self.response.iter_lines(decode_unicode=True):
+            if self.stop_requested:
+                print("[DEBUG] Stop requested")
+                self.stopped.emit()
+                return
+            if not line:
+                continue
+            try:
+                body = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"[DEBUG] Invalid JSON line: {line}")
+                continue
+            if body.get("error"):
+                raise ValueError(body["error"])
+            delta = body.get("message", {}).get("content", "")
+            if delta:
+                full_text += delta
+                chunk_count += 1
+                print(f"[DEBUG] Chunk {chunk_count}: {len(delta)} chars")
+                self.chunk.emit(delta)
+            if body.get("done"):
+                break
+        if not full_text:
+            raise ValueError("La respuesta de Ollama no tiene el formato esperado.")
+        print(f"[DEBUG] Completed. Total: {len(full_text)} chars")
+        self.finished.emit(full_text.strip())
+
+    def _run_cloud(self, model_name, prompt, images):
+        payload = {
+            "prompt": prompt,
+            "images": images,
+        }
+        self.status.emit(f"Conectando con el modelo '{model_name}' en la nube...")
+        print(f"[DEBUG] Connecting to {self.url}/generar, model: {model_name}, timeout: {self.timeout}s")
+        self.response = requests.post(
+            f"{self.url}/generar", json=payload, timeout=self.timeout
+        )
+        self.response.raise_for_status()
+        self.status.emit("Generando respuesta...")
+        print("[DEBUG] Generating response from cloud...")
+
+        try:
+            result = self.response.json()
+            if isinstance(result, dict):
+                full_text = result.get("response", result.get("text", str(result)))
+            else:
+                full_text = str(result)
+        except json.JSONDecodeError:
+            full_text = self.response.text
+
+        if not full_text:
+            raise ValueError("La respuesta de la nube no tiene el formato esperado.")
+
+        print(f"[DEBUG] Completed. Total: {len(full_text)} chars")
+        self.chunk.emit(full_text)
+        self.finished.emit(full_text.strip())
 
 
 class ModernApp(QMainWindow):
@@ -418,7 +445,7 @@ class ModernApp(QMainWindow):
         left_layout.addLayout(model_row)
 
         self.minimax_model = QComboBox()
-        self.minimax_model.addItems(["agente-minimax", "agente-minimax-lite"])
+        self.minimax_model.addItems(["agente-minimax", "agente-minimax-lite", "agente-minimax-cloud"])
         left_layout.addWidget(self.minimax_model)
 
         actions = QHBoxLayout()
@@ -798,13 +825,21 @@ class ModernApp(QMainWindow):
                 self.statusBar().showMessage("Deteniendo ejecución...")
 
     def _get_timeout_for_model(self, model_name):
-        heavy_models = ["agente-minimax", "Pro", "orcarouter/Qwen3.8-27B-Uncensored:latest"]
+        heavy_models = ["agente-minimax", "agente-minimax-cloud", "Pro", "orcarouter/Qwen3.8-27B-Uncensored:latest"]
         return OLLAMA_TIMEOUT_HEAVY if model_name in heavy_models else OLLAMA_TIMEOUT_NORMAL
+
+    def _get_url_for_model(self, model_name):
+        return OLLAMA_URL_CLOUD if model_name == "agente-minimax-cloud" else OLLAMA_URL
+
+    def _is_cloud_model(self, model_name):
+        return model_name == "agente-minimax-cloud"
 
     def _start_background_task(self, model_name, prompt, image_paths, target_key):
         timeout = self._get_timeout_for_model(model_name)
+        url = self._get_url_for_model(model_name)
+        is_cloud = self._is_cloud_model(model_name)
         worker_thread = QThread(self)
-        worker = OllamaWorker(timeout=timeout)
+        worker = OllamaWorker(timeout=timeout, url=url, is_cloud=is_cloud)
         worker.moveToThread(worker_thread)
         self.start_ollama_task.connect(worker.run, Qt.QueuedConnection)
         worker.finished.connect(self._handle_background_result, Qt.QueuedConnection)
