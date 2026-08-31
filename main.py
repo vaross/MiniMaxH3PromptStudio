@@ -1,16 +1,18 @@
 import base64
 import json
 import os
+import shutil
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 from PIL import Image
-from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSize, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QFrame,
@@ -31,7 +33,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QButtonGroup,
     QSplitter,
-    QDockWidget,
 )
 
 
@@ -47,6 +48,13 @@ def get_minimax_history_path():
     folder = Path(base) / "MiniMaxPromptStudio"
     folder.mkdir(parents=True, exist_ok=True)
     return folder / "minimax_history.json"
+
+
+def get_minimax_history_images_dir():
+    base = os.getenv("APPDATA") or str(Path.home())
+    folder = Path(base) / "MiniMaxPromptStudio" / "history_images"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def load_minimax_history():
@@ -68,6 +76,23 @@ def save_minimax_history(entries):
             json.dump(entries, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def format_timestamp_european(ts_iso):
+    try:
+        dt = datetime.fromisoformat(ts_iso)
+        return dt.strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return ts_iso
+
+
+def history_day_label(day):
+    today = datetime.now().date()
+    if day == today:
+        return "Hoy"
+    if day == today - timedelta(days=1):
+        return "Ayer"
+    return day.strftime("%d/%m/%Y")
 
 CSS = """
 QMainWindow {
@@ -202,6 +227,55 @@ QLabel#drop-title {
     font-weight: 700;
     font-size: 13px;
 }
+
+QPushButton#accordion-header {
+    background: #EEF4FF;
+    border: 1px solid #D9E5FF;
+    border-radius: 10px;
+    text-align: left;
+    padding: 8px 12px;
+    font-weight: 700;
+    color: #1E293B;
+}
+
+QPushButton#accordion-header:hover {
+    background: #E1EBFF;
+}
+
+QFrame#history-entry {
+    background: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 12px;
+}
+
+QFrame#history-entry:hover {
+    background: #F8FAFF;
+    border: 1px solid #C7D9FF;
+}
+
+QLabel#history-timestamp {
+    color: #6366F1;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+QLabel#history-preview {
+    color: #1F2937;
+    font-size: 12px;
+}
+
+QPushButton#favorite-button {
+    background: transparent;
+    border: none;
+    color: #F59E0B;
+    font-size: 15px;
+    padding: 0px;
+}
+
+QPushButton#favorite-button:hover {
+    background: #FFF7E6;
+    border-radius: 8px;
+}
 """
 
 
@@ -231,6 +305,91 @@ class ImageDropZone(QFrame):
         if paths:
             self.dropped.emit(paths)
             event.acceptProposedAction()
+
+
+class GalleryImageTile(QWidget):
+    """Single thumbnail tile used by the image gallery, with no filename shown."""
+
+    removed = Signal(str)
+
+    TILE_SIZE = (112, 96)
+
+    def __init__(self, path, pixmap, parent=None):
+        super().__init__(parent)
+        self.path = path
+        width, height = self.TILE_SIZE
+        self.setFixedSize(width, height)
+
+        self.thumb = QLabel(self)
+        self.thumb.setGeometry(0, 0, width, height)
+        self.thumb.setAlignment(Qt.AlignCenter)
+        self.thumb.setPixmap(pixmap)
+        self.thumb.setStyleSheet(
+            "border: 1px solid #dfe8ff; border-radius: 10px; background: #f8fbff;"
+        )
+
+        self.remove_btn = QPushButton("✕", self)
+        self.remove_btn.setObjectName("danger-button")
+        self.remove_btn.setFixedSize(20, 20)
+        self.remove_btn.move(width - 22, 2)
+        self.remove_btn.setStyleSheet(
+            "QPushButton { padding: 0px; font-size: 10px; border-radius: 10px; }"
+        )
+        self.remove_btn.setCursor(Qt.PointingHandCursor)
+        self.remove_btn.clicked.connect(lambda: self.removed.emit(self.path))
+
+
+class ReorderableImageList(QListWidget):
+    """Gallery-style image preview grid that accepts dropped files and supports drag-to-reorder."""
+
+    filesDropped = Signal(list)
+    orderChanged = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("drop-zone")
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setViewMode(QListWidget.IconMode)
+        self.setMovement(QListWidget.Snap)
+        self.setResizeMode(QListWidget.Adjust)
+        self.setFlow(QListWidget.LeftToRight)
+        self.setWrapping(True)
+        self.setUniformItemSizes(True)
+        self.setGridSize(QSize(122, 106))
+        self.setSpacing(6)
+        self.setMinimumHeight(150)
+        self.setMaximumHeight(320)
+        self.setFrameShape(QFrame.NoFrame)
+        self.model().rowsMoved.connect(lambda *_: self.orderChanged.emit())
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            paths = []
+            for url in event.mimeData().urls():
+                file_path = url.toLocalFile()
+                if file_path and os.path.isfile(file_path):
+                    paths.append(file_path)
+            if paths:
+                self.filesDropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
 
 
 class OllamaWorker(QObject):
@@ -271,7 +430,9 @@ class OllamaWorker(QObject):
                 self._run_local(model_name, prompt, images)
         except Exception as exc:
             print(f"[DEBUG] Exception: {exc}")
-            if not self.stop_requested:
+            if self.stop_requested:
+                self.stopped.emit()
+            else:
                 self.failed.emit(str(exc))
 
     def _run_local(self, model_name, prompt, images):
@@ -283,6 +444,11 @@ class OllamaWorker(QObject):
                 "images": images,
             }],
             "stream": True,
+            # -1 = sin límite de tokens de salida, evita que Ollama corte respuestas largas
+            "options": {
+                "num_predict": -1,
+                "num_ctx": 32768,
+            },
         }
         self.status.emit(f"Conectando con el modelo '{model_name}'...")
         print(f"[DEBUG] Connecting to {self.url}/api/chat, model: {model_name}, timeout: {self.timeout}s")
@@ -325,24 +491,38 @@ class OllamaWorker(QObject):
         payload = {
             "prompt": prompt,
             "images": images,
+            "options": {
+                "num_predict": -1,
+                "num_ctx": 32768,
+            },
         }
         self.status.emit(f"Conectando con el modelo '{model_name}' en la nube...")
         print(f"[DEBUG] Connecting to {self.url}/generar, model: {model_name}, timeout: {self.timeout}s")
         self.response = requests.post(
-            f"{self.url}/generar", json=payload, timeout=self.timeout
+            f"{self.url}/generar", json=payload, timeout=self.timeout, stream=True
         )
         self.response.raise_for_status()
         self.status.emit("Generando respuesta...")
         print("[DEBUG] Generating response from cloud...")
 
+        raw_parts = []
+        for chunk in self.response.iter_content(chunk_size=4096, decode_unicode=True):
+            if self.stop_requested:
+                print("[DEBUG] Stop requested")
+                self.stopped.emit()
+                return
+            if chunk:
+                raw_parts.append(chunk)
+        raw_text = "".join(raw_parts)
+
         try:
-            result = self.response.json()
+            result = json.loads(raw_text)
             if isinstance(result, dict):
                 full_text = result.get("response", result.get("text", str(result)))
             else:
                 full_text = str(result)
         except json.JSONDecodeError:
-            full_text = self.response.text
+            full_text = raw_text
 
         if not full_text:
             raise ValueError("La respuesta de la nube no tiene el formato esperado.")
@@ -350,6 +530,111 @@ class OllamaWorker(QObject):
         print(f"[DEBUG] Completed. Total: {len(full_text)} chars")
         self.chunk.emit(full_text)
         self.finished.emit(full_text.strip())
+
+
+class CollapsibleSection(QWidget):
+    """Accordion-style section with a toggleable header used to group history by day."""
+
+    def __init__(self, title, expanded=True, parent=None):
+        super().__init__(parent)
+        self._title = title
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.toggle_btn = QPushButton()
+        self.toggle_btn.setObjectName("accordion-header")
+        self.toggle_btn.setCheckable(True)
+        self.toggle_btn.setChecked(expanded)
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.clicked.connect(self._on_toggle)
+        layout.addWidget(self.toggle_btn)
+
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(6, 6, 6, 10)
+        self.content_layout.setSpacing(6)
+        self.content.setVisible(expanded)
+        layout.addWidget(self.content)
+
+        self._update_header_text()
+
+    def _update_header_text(self):
+        arrow = "▾" if self.toggle_btn.isChecked() else "▸"
+        self.toggle_btn.setText(f"{arrow}  {self._title}")
+
+    def _on_toggle(self):
+        expanded = self.toggle_btn.isChecked()
+        self.content.setVisible(expanded)
+        self._update_header_text()
+
+    def add_widget(self, widget):
+        self.content_layout.addWidget(widget)
+
+
+class HistoryEntryWidget(QFrame):
+    """Single row inside the history accordion, with favorite and delete actions."""
+
+    clicked = Signal(str)
+    deleteRequested = Signal(str)
+    favoriteToggled = Signal(str, bool)
+
+    def __init__(self, entry, parent=None):
+        super().__init__(parent)
+        self.entry_id = entry.get("id")
+        self._favorite = bool(entry.get("favorite", False))
+        self.setObjectName("history-entry")
+        self.setCursor(Qt.PointingHandCursor)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 8, 8, 8)
+        layout.setSpacing(8)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+
+        timestamp_label = QLabel(format_timestamp_european(entry.get("timestamp", "")))
+        timestamp_label.setObjectName("history-timestamp")
+        text_col.addWidget(timestamp_label)
+
+        preview = entry.get("input", "").strip().replace("\n", " ")
+        if len(preview) > 60:
+            preview = preview[:60] + "…"
+        if not preview:
+            preview = "(sin texto de entrada)"
+        image_count = len(entry.get("images", []))
+        if image_count:
+            preview += f"  [{image_count} img]"
+        preview_label = QLabel(preview)
+        preview_label.setWordWrap(True)
+        preview_label.setObjectName("history-preview")
+        text_col.addWidget(preview_label)
+
+        layout.addLayout(text_col, 1)
+
+        self.fav_btn = QPushButton("★" if self._favorite else "☆")
+        self.fav_btn.setObjectName("favorite-button")
+        self.fav_btn.setFixedWidth(30)
+        self.fav_btn.setCursor(Qt.PointingHandCursor)
+        self.fav_btn.clicked.connect(self._on_favorite_clicked)
+        layout.addWidget(self.fav_btn)
+
+        del_btn = QPushButton("✕")
+        del_btn.setObjectName("danger-button")
+        del_btn.setFixedWidth(30)
+        del_btn.setCursor(Qt.PointingHandCursor)
+        del_btn.clicked.connect(lambda: self.deleteRequested.emit(self.entry_id))
+        layout.addWidget(del_btn)
+
+    def _on_favorite_clicked(self):
+        self._favorite = not self._favorite
+        self.fav_btn.setText("★" if self._favorite else "☆")
+        self.favoriteToggled.emit(self.entry_id, self._favorite)
+
+    def mousePressEvent(self, event):
+        self.clicked.emit(self.entry_id)
+        super().mousePressEvent(event)
 
 
 class ModernApp(QMainWindow):
@@ -376,8 +661,6 @@ class ModernApp(QMainWindow):
         self.tabs.addTab(self._build_vision_tab(), "Descripción visual")
         self.setCentralWidget(self.tabs)
 
-        self._setup_history_dock()
-
         self.current_busy_text = ""
         self.spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self.spinner_index = 0
@@ -396,21 +679,6 @@ class ModernApp(QMainWindow):
             from PySide6.QtGui import QIcon
             self.setWindowIcon(QIcon(str(icon_path)))
 
-    def _setup_history_dock(self):
-        dock = QDockWidget("Historial de prompts", self)
-        dock.setObjectName("HistoryDock")
-        dock_widget = QWidget()
-        dock_layout = QVBoxLayout(dock_widget)
-        dock_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.minimax_history_list = QListWidget()
-        self.minimax_history_list.itemClicked.connect(self._load_minimax_history_item)
-        dock_layout.addWidget(self.minimax_history_list)
-
-        dock.setWidget(dock_widget)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        self._refresh_minimax_history_list()
-
     def _build_minimax_tab(self):
         container = QWidget()
         main_layout = QVBoxLayout(container)
@@ -420,6 +688,7 @@ class ModernApp(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, False)
 
         left_card = QFrame()
         left_card.setObjectName("card")
@@ -470,6 +739,17 @@ class ModernApp(QMainWindow):
         actions.addWidget(self.stop_button_minimax)
         left_layout.addLayout(actions)
 
+        log_title = QLabel("Registro en tiempo real")
+        log_title.setObjectName("section-title")
+        left_layout.addWidget(log_title)
+
+        self.minimax_log = QPlainTextEdit()
+        self.minimax_log.setReadOnly(True)
+        self.minimax_log.setPlaceholderText("Aquí verás el progreso de la generación...")
+        self.minimax_log.setMaximumHeight(160)
+        self.minimax_log.setStyleSheet("QPlainTextEdit { font-family: Consolas, monospace; font-size: 11px; }")
+        left_layout.addWidget(self.minimax_log)
+
         right_card = QFrame()
         right_card.setObjectName("card")
         right_layout = QVBoxLayout(right_card)
@@ -480,16 +760,12 @@ class ModernApp(QMainWindow):
         preview_title.setObjectName("section-title")
         right_layout.addWidget(preview_title)
 
-        preview_panel = ImageDropZone(self)
-        preview_panel.setObjectName("drop-zone")
-        preview_layout = QVBoxLayout(preview_panel)
-        preview_layout.setContentsMargins(12, 12, 12, 12)
-        preview_layout.setSpacing(10)
-        preview_panel.dropped.connect(self.add_minimax_images)
-        self.minimax_preview_container = preview_panel
-        self.minimax_preview_layout = preview_layout
+        preview_panel = ReorderableImageList(self)
+        preview_panel.filesDropped.connect(self.add_minimax_images)
+        preview_panel.orderChanged.connect(self._sync_minimax_image_order)
+        self.minimax_preview_list = preview_panel
         self._render_minimax_preview_empty()
-        right_layout.addWidget(preview_panel, 1)
+        right_layout.addWidget(preview_panel, 0)
 
         output_title = QLabel("Prompt generado")
         output_title.setObjectName("section-title")
@@ -497,39 +773,46 @@ class ModernApp(QMainWindow):
 
         self.minimax_output = QPlainTextEdit()
         self.minimax_output.setPlaceholderText("Tu prompt final aparecerá aquí...")
-        self.minimax_output.setMinimumHeight(180)
+        self.minimax_output.setMinimumHeight(200)
         right_layout.addWidget(self.minimax_output, 1)
 
         copy_row = QHBoxLayout()
+        copy_row.setContentsMargins(0, 6, 0, 0)
         copy_row.addStretch()
         btn_copy = QPushButton("Copiar todo")
         btn_copy.clicked.connect(self.copy_minimax_output)
         copy_row.addWidget(btn_copy)
-        right_layout.addLayout(copy_row)
+        right_layout.addLayout(copy_row, 0)
+
+        history_card = QFrame()
+        history_card.setObjectName("card")
+        history_layout = QVBoxLayout(history_card)
+        history_layout.setContentsMargins(18, 18, 18, 18)
+        history_layout.setSpacing(12)
+
+        history_title = QLabel("Historial de prompts")
+        history_title.setObjectName("section-title")
+        history_layout.addWidget(history_title)
+
+        history_scroll = QScrollArea()
+        history_scroll.setWidgetResizable(True)
+        history_scroll.setFrameShape(QFrame.NoFrame)
+
+        self.minimax_history_container = QWidget()
+        self.minimax_history_container_layout = QVBoxLayout(self.minimax_history_container)
+        self.minimax_history_container_layout.setContentsMargins(0, 0, 4, 0)
+        self.minimax_history_container_layout.setSpacing(10)
+        self.minimax_history_container_layout.addStretch(1)
+
+        history_scroll.setWidget(self.minimax_history_container)
+        history_layout.addWidget(history_scroll, 1)
+        self._refresh_minimax_history_list()
 
         splitter.addWidget(left_card)
         splitter.addWidget(right_card)
-        splitter.setSizes([400, 600])
+        splitter.addWidget(history_card)
+        splitter.setSizes([380, 560, 300])
         main_layout.addWidget(splitter, 1)
-
-        log_card = QFrame()
-        log_card.setObjectName("card")
-        log_layout = QVBoxLayout(log_card)
-        log_layout.setContentsMargins(18, 14, 18, 14)
-        log_layout.setSpacing(8)
-
-        log_title = QLabel("Registro en tiempo real")
-        log_title.setObjectName("section-title")
-        log_layout.addWidget(log_title)
-
-        self.minimax_log = QPlainTextEdit()
-        self.minimax_log.setReadOnly(True)
-        self.minimax_log.setPlaceholderText("Aquí verás el progreso de la generación...")
-        self.minimax_log.setMaximumHeight(120)
-        self.minimax_log.setStyleSheet("QPlainTextEdit { font-family: Consolas, monospace; font-size: 11px; }")
-        log_layout.addWidget(self.minimax_log)
-
-        main_layout.addWidget(log_card, 0)
 
         return container
 
@@ -631,7 +914,7 @@ class ModernApp(QMainWindow):
 
         self.vision_output = QPlainTextEdit()
         self.vision_output.setPlaceholderText("La descripción saldrá aquí...")
-        self.vision_output.setMinimumHeight(180)
+        self.vision_output.setMinimumHeight(320)
         right_layout.addWidget(self.vision_output, 1)
 
         copy_row = QHBoxLayout()
@@ -646,55 +929,47 @@ class ModernApp(QMainWindow):
         return container
 
     def _render_minimax_preview_empty(self):
-        while self.minimax_preview_layout.count():
-            item = self.minimax_preview_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self.minimax_preview_list.clear()
+        item = QListWidgetItem()
+        item.setFlags(Qt.NoItemFlags)
         empty = QLabel("Arrastra imágenes aquí o usa \"Cargar imágenes\"")
         empty.setObjectName("preview-empty")
         empty.setAlignment(Qt.AlignCenter)
         empty.setWordWrap(True)
-        self.minimax_preview_layout.addWidget(empty)
+        item.setSizeHint(empty.sizeHint())
+        self.minimax_preview_list.addItem(item)
+        self.minimax_preview_list.setItemWidget(item, empty)
 
     def _render_minimax_preview(self):
-        while self.minimax_preview_layout.count():
-            item = self.minimax_preview_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self.minimax_preview_list.clear()
 
         if not self.selected_minimax_images:
             self._render_minimax_preview_empty()
             return
 
-        for index, path in enumerate(self.selected_minimax_images):
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(4, 2, 4, 2)
-            row_layout.setSpacing(10)
-
-            label = QLabel()
-            label.setFixedSize(100, 72)
-            label.setStyleSheet("border: 1px solid #dfe8ff; border-radius: 10px; background: #f8fbff;")
-            label.setAlignment(Qt.AlignCenter)
+        for path in self.selected_minimax_images:
             try:
-                pixmap = self._pixmap_from_path(path, (100, 72))
-                label.setPixmap(pixmap)
+                pixmap = self._pixmap_from_path(path, GalleryImageTile.TILE_SIZE)
             except Exception:
-                label.setText("IMG")
+                pixmap = QPixmap()
 
-            text = QLabel(os.path.basename(path))
-            text.setWordWrap(True)
-            text.setMaximumWidth(230)
+            tile = GalleryImageTile(path, pixmap)
+            tile.removed.connect(self.remove_minimax_image)
 
-            remove_btn = QPushButton("✕")
-            remove_btn.setObjectName("danger-button")
-            remove_btn.clicked.connect(lambda checked, idx=index: self.remove_minimax_image(idx))
-            remove_btn.setFixedWidth(28)
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, path)
+            item.setSizeHint(tile.sizeHint())
+            self.minimax_preview_list.addItem(item)
+            self.minimax_preview_list.setItemWidget(item, tile)
 
-            row_layout.addWidget(label)
-            row_layout.addWidget(text, 1)
-            row_layout.addWidget(remove_btn)
-            self.minimax_preview_layout.addWidget(row)
+    def _sync_minimax_image_order(self):
+        order = []
+        for i in range(self.minimax_preview_list.count()):
+            path = self.minimax_preview_list.item(i).data(Qt.UserRole)
+            if path:
+                order.append(path)
+        if order:
+            self.selected_minimax_images = order
 
     def _pixmap_from_path(self, path, size):
         image = Image.open(path).convert("RGBA")
@@ -741,9 +1016,9 @@ class ModernApp(QMainWindow):
             return
         self.add_minimax_images(paths)
 
-    def remove_minimax_image(self, index):
-        if 0 <= index < len(self.selected_minimax_images):
-            del self.selected_minimax_images[index]
+    def remove_minimax_image(self, path):
+        if path in self.selected_minimax_images:
+            self.selected_minimax_images.remove(path)
             self._render_minimax_preview()
 
     def clear_minimax_images(self):
@@ -932,39 +1207,137 @@ class ModernApp(QMainWindow):
             self.statusBar().showMessage("Ejecución detenida.")
         self._active_task = None
 
+    def _archive_history_images(self, entry_id, image_paths):
+        if not image_paths:
+            return []
+        target_dir = get_minimax_history_images_dir() / entry_id
+        saved = []
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for index, path in enumerate(image_paths):
+                if not path or not os.path.exists(path):
+                    continue
+                ext = os.path.splitext(path)[1] or ".png"
+                dest = target_dir / f"img_{index}{ext}"
+                shutil.copyfile(path, dest)
+                saved.append(str(dest))
+        except Exception:
+            pass
+        return saved
+
     def _save_minimax_history_entry(self, output_text):
+        entry_id = str(uuid.uuid4())
         entry = {
-            "id": str(uuid.uuid4()),
+            "id": entry_id,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "model": self.minimax_model.currentText(),
             "input": self.minimax_input.toPlainText(),
             "output": output_text,
+            "images": self._archive_history_images(entry_id, self.selected_minimax_images),
+            "favorite": False,
         }
         self.minimax_history.insert(0, entry)
         del self.minimax_history[HISTORY_MAX_ENTRIES:]
         save_minimax_history(self.minimax_history)
         self._refresh_minimax_history_list()
 
-    def _refresh_minimax_history_list(self):
-        self.minimax_history_list.clear()
-        for entry in self.minimax_history:
-            preview = entry.get("input", "").strip().replace("\n", " ")
-            if len(preview) > 60:
-                preview = preview[:60] + "…"
-            if not preview:
-                preview = "(sin texto de entrada)"
-            item = QListWidgetItem(f"{entry.get('timestamp', '')} — {preview}")
-            item.setData(Qt.UserRole, entry.get("id"))
-            self.minimax_history_list.addItem(item)
+    def _clear_history_container(self):
+        layout = self.minimax_history_container_layout
+        while layout.count() > 1:
+            child = layout.takeAt(0)
+            widget = child.widget()
+            if widget:
+                widget.deleteLater()
 
-    def _load_minimax_history_item(self, item):
-        entry_id = item.data(Qt.UserRole)
+    def _make_history_entry_widget(self, entry):
+        widget = HistoryEntryWidget(entry)
+        widget.clicked.connect(self._load_minimax_history_item)
+        widget.deleteRequested.connect(self._delete_minimax_history_entry)
+        widget.favoriteToggled.connect(self._toggle_minimax_history_favorite)
+        return widget
+
+    def _refresh_minimax_history_list(self):
+        self._clear_history_container()
+        layout = self.minimax_history_container_layout
+
+        if not self.minimax_history:
+            empty = QLabel("Aún no hay prompts en el historial.")
+            empty.setObjectName("preview-empty")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setWordWrap(True)
+            layout.insertWidget(layout.count() - 1, empty)
+            return
+
+        favorites = [e for e in self.minimax_history if e.get("favorite")]
+        if favorites:
+            fav_section = CollapsibleSection("★ Favoritos", expanded=True)
+            for entry in favorites:
+                fav_section.add_widget(self._make_history_entry_widget(entry))
+            layout.insertWidget(layout.count() - 1, fav_section)
+
+        groups = []
+        groups_by_day = {}
+        for entry in self.minimax_history:
+            try:
+                day = datetime.fromisoformat(entry.get("timestamp", "")).date()
+            except Exception:
+                day = datetime.now().date()
+            if day not in groups_by_day:
+                groups_by_day[day] = []
+                groups.append(day)
+            groups_by_day[day].append(entry)
+
+        for index, day in enumerate(groups):
+            entries = groups_by_day[day]
+            section = CollapsibleSection(
+                f"{history_day_label(day)} ({len(entries)})", expanded=(index == 0)
+            )
+            for entry in entries:
+                section.add_widget(self._make_history_entry_widget(entry))
+            layout.insertWidget(layout.count() - 1, section)
+
+    def _delete_minimax_history_entry(self, entry_id):
+        entry = next((e for e in self.minimax_history if e.get("id") == entry_id), None)
+        if not entry:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Eliminar entrada",
+            "¿Seguro que quieres eliminar esta entrada del historial?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        entry_dir = get_minimax_history_images_dir() / entry_id
+        self.minimax_history = [e for e in self.minimax_history if e.get("id") != entry_id]
+        save_minimax_history(self.minimax_history)
+        if entry_dir.exists():
+            shutil.rmtree(entry_dir, ignore_errors=True)
+        self._refresh_minimax_history_list()
+        self.statusBar().showMessage("Entrada eliminada del historial.")
+
+    def _toggle_minimax_history_favorite(self, entry_id, is_favorite):
+        entry = next((e for e in self.minimax_history if e.get("id") == entry_id), None)
+        if not entry:
+            return
+        entry["favorite"] = is_favorite
+        save_minimax_history(self.minimax_history)
+        self._refresh_minimax_history_list()
+
+    def _load_minimax_history_item(self, entry_id):
         entry = next((e for e in self.minimax_history if e.get("id") == entry_id), None)
         if not entry:
             return
         self.minimax_input.setPlainText(entry.get("input", ""))
         self.minimax_output.setPlainText(entry.get("output", ""))
-        self.statusBar().showMessage("Prompt del historial cargado (sin imágenes).")
+        restored_images = [p for p in entry.get("images", []) if os.path.exists(p)]
+        self.selected_minimax_images = restored_images
+        if restored_images:
+            self._render_minimax_preview()
+            self.statusBar().showMessage(f"Prompt del historial cargado con {len(restored_images)} imagen(es).")
+        else:
+            self._render_minimax_preview_empty()
+            self.statusBar().showMessage("Prompt del historial cargado (sin imágenes).")
 
     def encode_image(self, image_path):
         with open(image_path, "rb") as f:

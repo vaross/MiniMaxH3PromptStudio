@@ -20,7 +20,14 @@ web_app = FastAPI()
 
 # 2. Preparamos tu Modelfile exacto
 MODELFILE = """FROM orcarouter/Qwen3.8-27B-Uncensored
-PARAMETER num_ctx 16192
+PARAMETER num_ctx 32768
+PARAMETER num_predict -1
+TEMPLATE \"\"\"{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+\"\"\"
 SYSTEM \"\"\"
 You are a specialized MiniMax H3 video-prompting agent.
 
@@ -400,7 +407,7 @@ Before producing the final prompt, confirm internally that:
 """
 
 # 3. Configuramos la clase que manejará la GPU (una A10G es perfecta para 9B)
-@app.cls(gpu="A100-80GB", image=image)
+@app.cls(gpu="H100", image=image)
 class AgenteOllama:
     @modal.enter()
     def arrancar_servidor(self):
@@ -427,6 +434,11 @@ class AgenteOllama:
                 "images": images or [],
             }],
             "stream": False,
+            # sin límite de tokens de salida, evita respuestas cortadas
+            "options": {
+                "num_predict": -1,
+                "num_ctx": 32768,
+            },
         })
         respuesta.raise_for_status()
         return respuesta.json()
@@ -435,6 +447,16 @@ class AgenteOllama:
 @web_app.post("/generar")
 async def generar_prompt(request: Request):
     datos = await request.json()
+    # --- ZONA DE LOGS (Se verá en el panel de Modal) ---
+    print("=== NUEVA PETICIÓN RECIBIDA ===")
+    print(f"Claves recibidas en el JSON: {list(datos.keys())}")
+    
+    # Comprobamos específicamente si enviaste un parámetro llamado 'imagenes'
+    if "images" in datos:
+        print(f"ÉXITO: Se han recibido {len(datos['images'])} imágenes.")
+    else:
+        print("AVISO: No se ha detectado el parámetro 'images'.")
+    # ---------------------------------------------------
     prompt_usuario = datos.get("prompt", "")
     imagenes = datos.get("images", [])
     if not isinstance(imagenes, list):
@@ -442,7 +464,7 @@ async def generar_prompt(request: Request):
     
     # Instanciamos la clase de la GPU y le mandamos el prompt y las imagenes.
     agente = AgenteOllama()
-    resultado = agente.consultar.remote(prompt_usuario, imagenes)
+    resultado = await agente.consultar.remote.aio(prompt_usuario, imagenes)
     return {"response": resultado.get("message", {}).get("content", "")}
 
 # 5. Conectamos FastAPI con Modal
