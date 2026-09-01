@@ -62,6 +62,28 @@ def get_workflow_paths():
     return sorted(workflows_dir.glob("*.json"), key=lambda path: path.name.lower())
 
 
+def get_workflow_node_ids(workflow):
+    required_types = {
+        "prompt": "PrimitiveStringMultiline",
+        "media": "MiniMaxH3MediaLoader",
+        "duration": "PrimitiveFloat",
+        "loras": "Power Lora Loader (rgthree)",
+        "output": "VHS_VideoCombine",
+    }
+    node_ids = {}
+    for key, class_type in required_types.items():
+        node_id = next(
+            (node_id for node_id, node in workflow.items() if node.get("class_type") == class_type),
+            None,
+        )
+        if node_id is None:
+            raise ValueError(f"Falta el nodo requerido: {class_type}.")
+        node_ids[key] = node_id
+    if not workflow[node_ids["output"]]["inputs"].get("save_output"):
+        raise ValueError("El workflow no tiene una salida de vídeo persistente activada.")
+    return node_ids
+
+
 def get_minimax_history_path():
     base = os.getenv("APPDATA") or str(Path.home())
     folder = Path(base) / "MiniMaxPromptStudio"
@@ -767,6 +789,7 @@ class ComfyUIRenderWorker(QObject):
         try:
             with open(self.workflow_path, "r", encoding="utf-8") as file_handle:
                 workflow = json.load(file_handle)
+            node_ids = get_workflow_node_ids(workflow)
 
             upload_id = uuid.uuid4().hex
             media = []
@@ -797,10 +820,10 @@ class ComfyUIRenderWorker(QObject):
                     "audio_mode": "off",
                 })
 
-            workflow["4032"]["inputs"]["media_state"] = json.dumps(media, ensure_ascii=False)
-            workflow["4035"]["inputs"]["value"] = self.prompt
-            workflow["4036"]["inputs"]["value"] = self.duration
-            lora_inputs = workflow["4044"]["inputs"]
+            workflow[node_ids["media"]]["inputs"]["media_state"] = json.dumps(media, ensure_ascii=False)
+            workflow[node_ids["prompt"]]["inputs"]["value"] = self.prompt
+            workflow[node_ids["duration"]]["inputs"]["value"] = self.duration
+            lora_inputs = workflow[node_ids["loras"]]["inputs"]
             for key in list(lora_inputs):
                 if key.startswith("lora_"):
                     del lora_inputs[key]
@@ -1540,13 +1563,7 @@ class ModernApp(QMainWindow):
         try:
             with open(workflow_path, "r", encoding="utf-8") as file_handle:
                 workflow = json.load(file_handle)
-            required_nodes = {"4032", "4035", "4036", "4044", "4064"}
-            missing_nodes = sorted(required_nodes - set(workflow))
-            if missing_nodes:
-                raise ValueError(
-                    "Este workflow no usa el contrato de MiniMax H3 Ultra necesario "
-                    f"para prompt, referencias, duración, LoRAs y salida: faltan {', '.join(missing_nodes)}."
-                )
+            get_workflow_node_ids(workflow)
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             QMessageBox.critical(self, "Workflow incompatible", str(exc))
             return
