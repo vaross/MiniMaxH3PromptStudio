@@ -4,7 +4,6 @@ import time
 import requests
 from fastapi import FastAPI, Request
 
-# 1. Definimos la imagen con zstd y FastAPI
 image = (
     modal.Image.debian_slim()
     .apt_install("curl", "zstd")
@@ -425,7 +424,16 @@ class AgenteOllama:
 
     # Este es el método interno para comunicarnos con el Ollama local
     @modal.method()
-    def consultar(self, prompt: str, images: list[str] | None = None):
+    def consultar(self, prompt: str, images: list[str] | None = None, options: dict | None = None):
+        generation_options = {
+            "num_predict": -1,
+            "num_ctx": 32768,
+        }
+        if options:
+            generation_options.update({
+                key: value for key, value in options.items()
+                if key in {"num_predict", "num_ctx"}
+            })
         respuesta = requests.post("http://localhost:11434/api/chat", json={
             "model": "minimax-agent",
             "messages": [{
@@ -434,11 +442,7 @@ class AgenteOllama:
                 "images": images or [],
             }],
             "stream": False,
-            # sin límite de tokens de salida, evita respuestas cortadas
-            "options": {
-                "num_predict": -1,
-                "num_ctx": 32768,
-            },
+            "options": generation_options,
         })
         respuesta.raise_for_status()
         return respuesta.json()
@@ -459,13 +463,20 @@ async def generar_prompt(request: Request):
     # ---------------------------------------------------
     prompt_usuario = datos.get("prompt", "")
     imagenes = datos.get("images", [])
+    opciones = datos.get("options", {})
     if not isinstance(imagenes, list):
         return {"error": "El campo 'images' debe ser una lista."}
+    if not isinstance(opciones, dict):
+        return {"error": "El campo 'options' debe ser un objeto."}
     
     # Instanciamos la clase de la GPU y le mandamos el prompt y las imagenes.
     agente = AgenteOllama()
-    resultado = await agente.consultar.remote.aio(prompt_usuario, imagenes)
-    return {"response": resultado.get("message", {}).get("content", "")}
+    resultado = await agente.consultar.remote.aio(prompt_usuario, imagenes, opciones)
+    return {
+        "response": resultado.get("message", {}).get("content", ""),
+        "done_reason": resultado.get("done_reason"),
+        "eval_count": resultado.get("eval_count"),
+    }
 
 # 5. Conectamos FastAPI con Modal
 @app.function(image=image)

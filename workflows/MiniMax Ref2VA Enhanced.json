@@ -1,0 +1,612 @@
+{
+  "2385": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "lora_1": {
+        "on": true,
+        "lora": "HMCumshot_V2.safetensors",
+        "strength": 0.9
+      },
+      "lora_2": {
+        "on": false,
+        "lora": "deepthroat_v02.safetensors",
+        "strength": 1
+      },
+      "lora_3": {
+        "on": true,
+        "lora": "MysticXXX_MMH3-V4.safetensors",
+        "strength": 0.8
+      },
+      "lora_4": {
+        "on": false,
+        "lora": "MM-H3 - Blowjob v2.1.safetensors",
+        "strength": 1
+      },
+      "lora_5": {
+        "on": false,
+        "lora": "h3-realism-people-t2v-i2v-r2v.safetensors",
+        "strength": 1
+      },
+      "lora_6": {
+        "on": false,
+        "lora": "H3_Deeper.safetensors",
+        "strength": 1
+      },
+      "lora_7": {
+        "on": false,
+        "lora": "HMNSFW_AIO_V2.safetensors",
+        "strength": 1
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "2415",
+        0
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Power Lora Loader (rgthree)"
+    }
+  },
+  "2387": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "Cadena (Multilínea)"
+    }
+  },
+  "2390": {
+    "inputs": {
+      "shift_video": 12,
+      "shift_audio": 3,
+      "model": [
+        "2385",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3SigmaShift",
+    "_meta": {
+      "title": "ModelSamplingMiniMaxH3"
+    }
+  },
+  "2392": {
+    "inputs": {
+      "sage_attention": "auto",
+      "allow_compile": true,
+      "model": [
+        "2390",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "2395": {
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 0.9,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "Selector de Resolución"
+    }
+  },
+  "2400": {
+    "inputs": {
+      "frame_rate": 48,
+      "loop_count": 0,
+      "filename_prefix": "MiMx-REF",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": [
+        "2396:2358",
+        0
+      ],
+      "audio": [
+        "2396:2258",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "Video Combine 🎥🅥🅗🅢"
+    }
+  },
+  "2401": {
+    "inputs": {
+      "noise_seed": 863766645589393
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "Ruido aleatorio"
+    }
+  },
+  "2403": {
+    "inputs": {
+      "value": 11
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Flotante"
+    }
+  },
+  "2404": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "2405": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 8,
+      "denoise": 1,
+      "model": [
+        "2393:2214",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "ProgramadorBásico"
+    }
+  },
+  "2406": {
+    "inputs": {
+      "references": [
+        "2407",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceSplitter",
+    "_meta": {
+      "title": "Fantastic H3 Reference Splitter"
+    }
+  },
+  "2407": {
+    "inputs": {
+      "media_state": "[{\"kind\":\"audio\",\"file\":\"minimax_h3/yomismo.m4a [input]\",\"name\":\"yomismo.m4a\",\"duration\":15.35,\"width\":null,\"height\":null,\"has_audio\":true,\"audio_mode\":\"off\",\"trim\":{\"start\":1.51,\"end\":8.65},\"enabled\":false,\"uid\":\"mmtih0yue9\"},{\"kind\":\"audio\",\"file\":\"minimax_h3/rocio.m4a [input]\",\"name\":\"rocio.m4a\",\"duration\":9.82,\"width\":null,\"height\":null,\"has_audio\":true,\"audio_mode\":\"off\",\"enabled\":false,\"uid\":\"mmtih0yue13\"}]",
+      "Open loader…": null,
+      "+ Native-output splitter": null
+    },
+    "class_type": "MiniMaxH3MediaLoader",
+    "_meta": {
+      "title": "Fantastic H3 Media Loader"
+    }
+  },
+  "2409": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Cargar VAE"
+    }
+  },
+  "2410": {
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Cargar VAE"
+    }
+  },
+  "2412": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Cargar CLIP"
+    }
+  },
+  "2415": {
+    "inputs": {
+      "unet_name": "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Cargar Modelo de Difusión"
+    }
+  },
+  "2393:2214": {
+    "inputs": {
+      "enabled": true,
+      "blend_weight": 0.5,
+      "degree": 1,
+      "ridge_lambda": 0.1,
+      "window_size": 2,
+      "flex_window": 0.75,
+      "warmup_steps": 1,
+      "tail_actual_steps": 1,
+      "max_history": 8,
+      "debug": false,
+      "history_storage": "system_ram",
+      "bootstrap_first_forecast": true,
+      "anchor_residual_feedback": false,
+      "selective_rollback_correction": false,
+      "offline_smoothing_replay": true,
+      "audio_blend_weight": 0,
+      "offline_archive_storage": "system_ram",
+      "model_aware_mode": "off",
+      "model_aware_risk_threshold": 0.65,
+      "model_aware_trust_shrinkage": false,
+      "model_aware_replay_generic_correction": false,
+      "generic_correction_mode": "coordinate_rls",
+      "generic_correction_limiter": "hard_clip",
+      "generic_correction_limit": 0.4,
+      "generic_correction_attenuation": "no_attenuation",
+      "sa_pece_forecast_policy": "balanced",
+      "model": [
+        "2392",
+        0
+      ]
+    },
+    "class_type": "SpectrumApplyMiniMaxH3",
+    "_meta": {
+      "title": "Spectrum Apply MiniMax H3"
+    }
+  },
+  "2396:2261": {
+    "inputs": {
+      "model": [
+        "2393:2214",
+        0
+      ],
+      "conditioning": [
+        "2396:2254",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "GuíaBásica"
+    }
+  },
+  "2396:2258": {
+    "inputs": {
+      "samples": [
+        "2396:2256",
+        0
+      ],
+      "vae": [
+        "2410",
+        0
+      ]
+    },
+    "class_type": "VAEDecodeAudio",
+    "_meta": {
+      "title": "VAEDecodeAudio"
+    }
+  },
+  "2396:2254": {
+    "inputs": {
+      "prompt": [
+        "2387",
+        0
+      ],
+      "width": [
+        "2396:2255",
+        0
+      ],
+      "height": [
+        "2396:2253",
+        0
+      ],
+      "length": [
+        "2396:2260",
+        1
+      ],
+      "ref_image_size": "match",
+      "clip": [
+        "2412",
+        0
+      ],
+      "vae": [
+        "2409",
+        0
+      ],
+      "audio_vae": [
+        "2410",
+        0
+      ],
+      "ref_images.ref_image_0": [
+        "2396:2257",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "2396:2257",
+        1
+      ],
+      "ref_images.ref_image_2": [
+        "2396:2257",
+        2
+      ],
+      "ref_images.ref_image_3": [
+        "2396:2257",
+        3
+      ],
+      "ref_images.ref_image_4": [
+        "2396:2257",
+        4
+      ],
+      "ref_images.ref_image_5": [
+        "2396:2257",
+        5
+      ],
+      "ref_images.ref_image_6": [
+        "2396:2257",
+        6
+      ],
+      "ref_images.ref_image_7": [
+        "2396:2257",
+        7
+      ],
+      "ref_images.ref_image_8": [
+        "2396:2257",
+        8
+      ],
+      "ref_videos.ref_video_0": [
+        "2396:2257",
+        9
+      ],
+      "ref_videos.ref_video_1": [
+        "2396:2257",
+        10
+      ],
+      "ref_videos.ref_video_2": [
+        "2396:2257",
+        11
+      ],
+      "ref_video_audios.ref_video_audio_0": [
+        "2396:2257",
+        12
+      ],
+      "ref_video_audios.ref_video_audio_1": [
+        "2396:2257",
+        13
+      ],
+      "ref_video_audios.ref_video_audio_2": [
+        "2396:2257",
+        14
+      ],
+      "ref_audios.ref_audio_0": [
+        "2396:2257",
+        15
+      ],
+      "ref_audios.ref_audio_1": [
+        "2396:2257",
+        16
+      ],
+      "ref_audios.ref_audio_2": [
+        "2396:2257",
+        17
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "_meta": {
+      "title": "MiniMax H3 Reference to Video"
+    }
+  },
+  "2396:2257": {
+    "inputs": {
+      "references": [
+        "2407",
+        0
+      ]
+    },
+    "class_type": "MiniMaxH3ReferenceSplitter",
+    "_meta": {
+      "title": "Fantastic H3 Reference Splitter"
+    }
+  },
+  "2396:2356": {
+    "inputs": {
+      "multiplier": 2,
+      "interp_model": [
+        "2396:2355",
+        0
+      ],
+      "images": [
+        "2396:2362",
+        0
+      ]
+    },
+    "class_type": "FrameInterpolate",
+    "_meta": {
+      "title": "Interpolar fotogramas"
+    }
+  },
+  "2396:2260": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "2403",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Expresión matemática"
+    }
+  },
+  "2396:2255": {
+    "inputs": {
+      "any_02": [
+        "2395",
+        0
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "2396:2253": {
+    "inputs": {
+      "any_02": [
+        "2395",
+        1
+      ]
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "Any Switch (rgthree)"
+    }
+  },
+  "2396:2359": {
+    "inputs": {
+      "expression": "a * 2",
+      "values.a": [
+        "2396:2255",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Expresión matemática"
+    }
+  },
+  "2396:2360": {
+    "inputs": {
+      "expression": "a * 2",
+      "values.a": [
+        "2396:2253",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Expresión matemática"
+    }
+  },
+  "2396:2363": {
+    "inputs": {
+      "expression": "a * 2"
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Expresión matemática"
+    }
+  },
+  "2396:2256": {
+    "inputs": {
+      "noise": [
+        "2401",
+        0
+      ],
+      "guider": [
+        "2396:2261",
+        0
+      ],
+      "sampler": [
+        "2404",
+        0
+      ],
+      "sigmas": [
+        "2405",
+        0
+      ],
+      "latent_image": [
+        "2396:2254",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "2396:2259": {
+    "inputs": {
+      "samples": [
+        "2396:2256",
+        0
+      ],
+      "vae": [
+        "2409",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "Decodificación VAE"
+    }
+  },
+  "2396:2355": {
+    "inputs": {
+      "model_name": "rife_v4.26_heavy.safetensors"
+    },
+    "class_type": "FrameInterpolationModelLoader",
+    "_meta": {
+      "title": "Cargar modelo de interpolación de fotogramas"
+    }
+  },
+  "2396:2362": {
+    "inputs": {
+      "value": [
+        "2396:2259",
+        0
+      ]
+    },
+    "class_type": "UnloadAllModels",
+    "_meta": {
+      "title": "UnloadAllModels"
+    }
+  },
+  "2396:2358": {
+    "inputs": {
+      "denoise": false,
+      "denoise_quality": "Ultra",
+      "deblur": false,
+      "deblur_quality": "Ultra",
+      "upscale": "VSR",
+      "upscale_quality": "Ultra",
+      "resize_type": "Scale",
+      "scale": 2,
+      "megapixels": 2,
+      "width": [
+        "2396:2359",
+        1
+      ],
+      "height": [
+        "2396:2360",
+        1
+      ],
+      "divisible_by": "32",
+      "ratio_preset": "16:9",
+      "resize_method": "Center Crop (Fill)",
+      "device_id": 0,
+      "empty_cache": false,
+      "use_mmap": false,
+      "auto_unload_models": true,
+      "images": [
+        "2396:2356",
+        0
+      ]
+    },
+    "class_type": "DaSiWa_RTX_UpscalerRefiner",
+    "_meta": {
+      "title": "DaSiWa RTX Upscaler & Refiner"
+    }
+  }
+}

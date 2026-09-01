@@ -3,14 +3,18 @@ import json
 import os
 import shutil
 import sys
+import time
 import uuid
+from urllib.parse import urlencode
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 from PIL import Image
-from PySide6.QtCore import QObject, QSize, QThread, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QObject, QSize, QThread, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QImage, QPixmap
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -27,20 +31,35 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
     QComboBox,
     QButtonGroup,
+    QCheckBox,
+    QDoubleSpinBox,
+    QLineEdit,
     QSplitter,
 )
 
 
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_URL_CLOUD = os.getenv("MODAL_OLLAMA_URL", "https://vilchesdiaz-alvaro--agente-minimax-h3-fastapi-app.modal.run")
+COMFYUI_MODAL_URL = os.getenv("COMFYUI_MODAL_URL", "https://vilchesdiaz-alvaro--comfyui-minimax-ui.modal.run")
 OLLAMA_TIMEOUT_NORMAL = 600  # 10 minutos
 OLLAMA_TIMEOUT_HEAVY = 1800  # 30 minutos
 HISTORY_MAX_ENTRIES = 200
+
+
+def get_resource_path(filename):
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base / filename
+
+
+def get_workflow_paths():
+    workflows_dir = get_resource_path("workflows")
+    return sorted(workflows_dir.glob("*.json"), key=lambda path: path.name.lower())
 
 
 def get_minimax_history_path():
@@ -328,15 +347,18 @@ class GalleryImageTile(QWidget):
             "border: 1px solid #dfe8ff; border-radius: 10px; background: #f8fbff;"
         )
 
-        self.remove_btn = QPushButton("✕", self)
+        self.remove_btn = QPushButton("X", self)
         self.remove_btn.setObjectName("danger-button")
         self.remove_btn.setFixedSize(20, 20)
         self.remove_btn.move(width - 22, 2)
         self.remove_btn.setStyleSheet(
-            "QPushButton { padding: 0px; font-size: 10px; border-radius: 10px; }"
+            "QPushButton { padding: 0px; font-size: 10px; font-weight: 700; border-radius: 10px; }"
         )
         self.remove_btn.setCursor(Qt.PointingHandCursor)
         self.remove_btn.clicked.connect(lambda: self.removed.emit(self.path))
+
+    def sizeHint(self):
+        return QSize(*self.TILE_SIZE)
 
 
 class ReorderableImageList(QListWidget):
@@ -385,6 +407,42 @@ class ReorderableImageList(QListWidget):
                 file_path = url.toLocalFile()
                 if file_path and os.path.isfile(file_path):
                     paths.append(file_path)
+            if paths:
+                self.filesDropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
+
+
+class ReorderableFileList(QListWidget):
+    filesDropped = Signal(list)
+    orderChanged = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setMinimumHeight(120)
+        self.model().rowsMoved.connect(lambda *_: self.orderChanged.emit())
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            paths = [url.toLocalFile() for url in event.mimeData().urls() if url.toLocalFile()]
             if paths:
                 self.filesDropped.emit(paths)
             event.acceptProposedAction()
@@ -519,6 +577,13 @@ class OllamaWorker(QObject):
             result = json.loads(raw_text)
             if isinstance(result, dict):
                 full_text = result.get("response", result.get("text", str(result)))
+                done_reason = result.get("done_reason")
+                eval_count = result.get("eval_count")
+                if done_reason:
+                    self.status.emit(
+                        f"La nube finalizó por: {done_reason}"
+                        + (f" ({eval_count} tokens generados)." if eval_count is not None else ".")
+                    )
             else:
                 full_text = str(result)
         except json.JSONDecodeError:
@@ -620,9 +685,12 @@ class HistoryEntryWidget(QFrame):
         self.fav_btn.clicked.connect(self._on_favorite_clicked)
         layout.addWidget(self.fav_btn)
 
-        del_btn = QPushButton("✕")
+        del_btn = QPushButton("X")
         del_btn.setObjectName("danger-button")
-        del_btn.setFixedWidth(30)
+        del_btn.setFixedSize(30, 30)
+        del_btn.setStyleSheet(
+            "QPushButton { padding: 0px; font-size: 12px; font-weight: 700; }"
+        )
         del_btn.setCursor(Qt.PointingHandCursor)
         del_btn.clicked.connect(lambda: self.deleteRequested.emit(self.entry_id))
         layout.addWidget(del_btn)
@@ -637,13 +705,165 @@ class HistoryEntryWidget(QFrame):
         super().mousePressEvent(event)
 
 
+class ComfyUICatalogWorker(QObject):
+    finished = Signal(str, list)
+    failed = Signal(str)
+
+    def __init__(self, base_url):
+        super().__init__()
+        self.base_url = base_url.rstrip("/")
+
+    @Slot()
+    def run(self):
+        try:
+            stats = requests.get(f"{self.base_url}/system_stats", timeout=120)
+            stats.raise_for_status()
+            response = requests.get(f"{self.base_url}/models/loras", timeout=120)
+            response.raise_for_status()
+            loras = response.json()
+            if not isinstance(loras, list) or not all(isinstance(name, str) for name in loras):
+                raise ValueError("ComfyUI devolvió un catálogo de LoRAs no válido.")
+            self.finished.emit(self.base_url, sorted(loras, key=str.lower))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ComfyUIRenderWorker(QObject):
+    status = Signal(str)
+    elapsed = Signal(int)
+    queued = Signal(str)
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, base_url, workflow_path, prompt, duration, image_paths, audio_paths, loras):
+        super().__init__()
+        self.base_url = base_url.rstrip("/")
+        self.workflow_path = workflow_path
+        self.prompt = prompt
+        self.duration = duration
+        self.image_paths = image_paths
+        self.audio_paths = audio_paths
+        self.loras = loras
+
+    def _upload_file(self, path, upload_id):
+        self.status.emit(f"Subiendo {Path(path).name}...")
+        with open(path, "rb") as file_handle:
+            response = requests.post(
+                f"{self.base_url}/upload/image",
+                files={"image": (f"{upload_id}_{Path(path).name}", file_handle)},
+                data={"overwrite": "true"},
+                timeout=600,
+            )
+        response.raise_for_status()
+        data = response.json()
+        name = data.get("name")
+        subfolder = data.get("subfolder", "")
+        if not name:
+            raise ValueError(f"ComfyUI no confirmó la carga de {Path(path).name}.")
+        return f"{subfolder}/{name}".lstrip("/")
+
+    @Slot()
+    def run(self):
+        try:
+            with open(self.workflow_path, "r", encoding="utf-8") as file_handle:
+                workflow = json.load(file_handle)
+
+            upload_id = uuid.uuid4().hex
+            media = []
+            for path in self.image_paths:
+                uploaded_path = self._upload_file(path, upload_id)
+                with Image.open(path) as image:
+                    width, height = image.size
+                media.append({
+                    "kind": "picture",
+                    "file": f"{uploaded_path} [input]",
+                    "name": Path(path).name,
+                    "duration": None,
+                    "width": width,
+                    "height": height,
+                    "has_audio": False,
+                    "audio_mode": "off",
+                })
+            for path in self.audio_paths:
+                uploaded_path = self._upload_file(path, upload_id)
+                media.append({
+                    "kind": "audio",
+                    "file": f"{uploaded_path} [input]",
+                    "name": Path(path).name,
+                    "duration": None,
+                    "width": None,
+                    "height": None,
+                    "has_audio": True,
+                    "audio_mode": "off",
+                })
+
+            workflow["4032"]["inputs"]["media_state"] = json.dumps(media, ensure_ascii=False)
+            workflow["4035"]["inputs"]["value"] = self.prompt
+            workflow["4036"]["inputs"]["value"] = self.duration
+            lora_inputs = workflow["4044"]["inputs"]
+            for key in list(lora_inputs):
+                if key.startswith("lora_"):
+                    del lora_inputs[key]
+            for index, (name, weight) in enumerate(self.loras, start=1):
+                lora_inputs[f"lora_{index}"] = {"on": True, "lora": name, "strength": weight}
+
+            self.status.emit("Enviando workflow a ComfyUI...")
+            response = requests.post(
+                f"{self.base_url}/prompt",
+                json={"prompt": workflow, "client_id": upload_id},
+                timeout=120,
+            )
+            response.raise_for_status()
+            prompt_id = response.json().get("prompt_id")
+            if not prompt_id:
+                raise ValueError("ComfyUI no devolvió el identificador del trabajo.")
+            self.queued.emit(prompt_id)
+            self._wait_for_result(prompt_id)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def _wait_for_result(self, prompt_id):
+        self.status.emit("Trabajo en cola de ComfyUI...")
+        generation_started = False
+        generation_start_time = None
+        while True:
+            response = requests.get(f"{self.base_url}/history/{prompt_id}", timeout=120)
+            response.raise_for_status()
+            result = response.json().get(prompt_id)
+            if result:
+                status = result.get("status", {})
+                if status.get("status_str") == "error":
+                    messages = status.get("messages", [])
+                    raise ValueError(f"ComfyUI no pudo generar el vídeo: {messages}")
+                for output in result.get("outputs", {}).values():
+                    for file_info in output.get("gifs", []) + output.get("images", []):
+                        filename = file_info.get("filename")
+                        if filename:
+                            query = urlencode({
+                                "filename": filename,
+                                "subfolder": file_info.get("subfolder", ""),
+                                "type": file_info.get("type", "output"),
+                            })
+                            self.completed.emit(f"{self.base_url}/view?{query}")
+                            return
+                raise ValueError("ComfyUI completó el trabajo, pero no devolvió un archivo de vídeo.")
+            if not generation_started:
+                generation_started = True
+                generation_start_time = time.monotonic()
+                self.status.emit("Generando vídeo en ComfyUI...")
+            self.elapsed.emit(int(time.monotonic() - generation_start_time))
+            time.sleep(1)
+
+
 class ModernApp(QMainWindow):
     start_ollama_task = Signal(str, str, object)
 
     def __init__(self):
         super().__init__()
         self.selected_minimax_images = []
+        self.selected_modal_images = []
         self.selected_vision_image = ""
+        self.selected_modal_audios = []
         self.minimax_history = load_minimax_history()
         self.setWindowTitle("MiniMax + Vision Studio")
         self.resize(1400, 900)
@@ -654,11 +874,16 @@ class ModernApp(QMainWindow):
         self._active_task = None
         self.stop_button_minimax = None
         self.stop_button_vision = None
+        self.comfyui_catalog_thread = None
+        self.comfyui_catalog_worker = None
+        self.comfyui_render_thread = None
+        self.comfyui_render_worker = None
 
         self.tabs = QTabWidget(self)
         self.tabs.setDocumentMode(True)
         self.tabs.addTab(self._build_minimax_tab(), "MiniMax H3")
         self.tabs.addTab(self._build_vision_tab(), "Descripción visual")
+        self.tabs.addTab(self._build_comfyui_modal_tab(), "ComfyUI Modal")
         self.setCentralWidget(self.tabs)
 
         self.current_busy_text = ""
@@ -779,6 +1004,9 @@ class ModernApp(QMainWindow):
         copy_row = QHBoxLayout()
         copy_row.setContentsMargins(0, 6, 0, 0)
         copy_row.addStretch()
+        btn_send_to_modal = QPushButton("Enviar a ComfyUI Modal")
+        btn_send_to_modal.clicked.connect(self.send_minimax_to_comfyui)
+        copy_row.addWidget(btn_send_to_modal)
         btn_copy = QPushButton("Copiar todo")
         btn_copy.clicked.connect(self.copy_minimax_output)
         copy_row.addWidget(btn_copy)
@@ -928,6 +1156,172 @@ class ModernApp(QMainWindow):
         outer.addWidget(right_card, 1)
         return container
 
+    def _build_comfyui_modal_tab(self):
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        settings_card = QFrame()
+        settings_card.setObjectName("card")
+        settings_layout = QVBoxLayout(settings_card)
+        settings_layout.setContentsMargins(18, 18, 18, 18)
+        settings_layout.setSpacing(12)
+
+        endpoint_label = QLabel("Endpoint de ComfyUI")
+        endpoint_label.setObjectName("section-title")
+        settings_layout.addWidget(endpoint_label)
+        self.comfyui_modal_url = QLineEdit(COMFYUI_MODAL_URL)
+        self.comfyui_modal_url.setClearButtonEnabled(True)
+        settings_layout.addWidget(self.comfyui_modal_url)
+
+        connection_row = QHBoxLayout()
+        self.comfyui_connection_label = QLabel("Catálogo no cargado")
+        self.comfyui_connection_label.setObjectName("preview-empty")
+        self.comfyui_refresh_button = QPushButton("Actualizar LoRAs")
+        self.comfyui_refresh_button.clicked.connect(self.refresh_comfyui_loras)
+        connection_row.addWidget(self.comfyui_connection_label, 1)
+        connection_row.addWidget(self.comfyui_refresh_button)
+        settings_layout.addLayout(connection_row)
+
+        prompt_label = QLabel("Prompt para vídeo")
+        prompt_label.setObjectName("section-title")
+        settings_layout.addWidget(prompt_label)
+        self.comfyui_prompt = QPlainTextEdit()
+        self.comfyui_prompt.setPlaceholderText("El prompt que se enviará al workflow de ComfyUI...")
+        self.comfyui_prompt.setMinimumHeight(260)
+        settings_layout.addWidget(self.comfyui_prompt, 1)
+
+        prompt_action = QHBoxLayout()
+        use_prompt_button = QPushButton("Usar prompt generado")
+        use_prompt_button.clicked.connect(self.use_minimax_prompt_for_comfyui)
+        prompt_action.addWidget(use_prompt_button)
+        prompt_action.addStretch()
+        settings_layout.addLayout(prompt_action)
+
+        workflow_label = QLabel("Workflow")
+        workflow_label.setObjectName("section-title")
+        settings_layout.addWidget(workflow_label)
+        self.comfyui_workflow = QComboBox()
+        for workflow_path in get_workflow_paths():
+            self.comfyui_workflow.addItem(workflow_path.stem, str(workflow_path))
+        self.comfyui_workflow.setEnabled(self.comfyui_workflow.count() > 0)
+        settings_layout.addWidget(self.comfyui_workflow)
+
+        duration_label = QLabel("Duración del vídeo")
+        duration_label.setObjectName("section-title")
+        settings_layout.addWidget(duration_label)
+        self.comfyui_duration = QDoubleSpinBox()
+        self.comfyui_duration.setRange(5.17, 15.08)
+        self.comfyui_duration.setSingleStep(0.01)
+        self.comfyui_duration.setValue(10.13)
+        self.comfyui_duration.setDecimals(2)
+        self.comfyui_duration.setSuffix(" s")
+        settings_layout.addWidget(self.comfyui_duration)
+
+        render_row = QHBoxLayout()
+        self.comfyui_render_status = QLabel("Listo para preparar un vídeo")
+        self.comfyui_render_status.setObjectName("preview-empty")
+        self.comfyui_render_button = QPushButton("Generar vídeo")
+        self.comfyui_render_button.setObjectName("primary-button")
+        self.comfyui_render_button.clicked.connect(self.generate_comfyui_video)
+        render_row.addWidget(self.comfyui_render_status, 1)
+        render_row.addWidget(self.comfyui_render_button)
+        settings_layout.addLayout(render_row)
+
+        lora_card = QFrame()
+        lora_card.setObjectName("card")
+        lora_layout = QVBoxLayout(lora_card)
+        lora_layout.setContentsMargins(18, 18, 18, 18)
+        lora_layout.setSpacing(12)
+
+        lora_label = QLabel("LoRAs disponibles en Modal")
+        lora_label.setObjectName("section-title")
+        lora_layout.addWidget(lora_label)
+        self.comfyui_lora_list = QListWidget()
+        self.comfyui_lora_list.setAlternatingRowColors(True)
+        self.comfyui_lora_list.setMinimumHeight(180)
+        self.comfyui_lora_list.setMaximumHeight(300)
+        lora_layout.addWidget(self.comfyui_lora_list)
+        self.comfyui_lora_controls = {}
+
+        image_label = QLabel("Imágenes de referencia")
+        image_label.setObjectName("section-title")
+        lora_layout.addWidget(image_label)
+        self.comfyui_image_list = ReorderableImageList(self)
+        self.comfyui_image_list.filesDropped.connect(self.add_modal_images)
+        self.comfyui_image_list.orderChanged.connect(self._sync_modal_image_order)
+        self.comfyui_image_list.setMinimumHeight(150)
+        self.comfyui_image_list.setMaximumHeight(230)
+        lora_layout.addWidget(self.comfyui_image_list)
+        image_actions = QHBoxLayout()
+        add_image_button = QPushButton("Añadir imágenes")
+        add_image_button.clicked.connect(self.select_modal_images)
+        remove_images_button = QPushButton("Eliminar todas")
+        remove_images_button.setObjectName("danger-button")
+        remove_images_button.clicked.connect(self.clear_modal_images)
+        image_actions.addWidget(add_image_button)
+        image_actions.addWidget(remove_images_button)
+        lora_layout.addLayout(image_actions)
+        self._render_modal_images()
+
+        audio_label = QLabel("Audios de referencia")
+        audio_label.setObjectName("section-title")
+        lora_layout.addWidget(audio_label)
+        self.comfyui_audio_list = ReorderableFileList()
+        self.comfyui_audio_list.filesDropped.connect(self.add_modal_audios)
+        self.comfyui_audio_list.orderChanged.connect(self._sync_modal_audio_order)
+        self.comfyui_audio_list.setMaximumHeight(130)
+        lora_layout.addWidget(self.comfyui_audio_list)
+        audio_row = QHBoxLayout()
+        load_audio_button = QPushButton("Cargar audios")
+        load_audio_button.clicked.connect(self.select_modal_audios)
+        remove_audio_button = QPushButton("Eliminar seleccionado")
+        remove_audio_button.setObjectName("danger-button")
+        remove_audio_button.clicked.connect(self.remove_selected_modal_audio)
+        audio_row.addWidget(load_audio_button)
+        audio_row.addWidget(remove_audio_button)
+        lora_layout.addLayout(audio_row)
+
+        result_card = QFrame()
+        result_card.setObjectName("card")
+        result_layout = QVBoxLayout(result_card)
+        result_layout.setContentsMargins(18, 18, 18, 18)
+        result_layout.setSpacing(12)
+        result_title = QLabel("Vídeo generado")
+        result_title.setObjectName("section-title")
+        result_layout.addWidget(result_title)
+        self.comfyui_video_widget = QVideoWidget()
+        self.comfyui_video_widget.setMinimumSize(280, 220)
+        result_layout.addWidget(self.comfyui_video_widget, 1)
+        self.comfyui_audio_output = QAudioOutput(self)
+        self.comfyui_media_player = QMediaPlayer(self)
+        self.comfyui_media_player.setAudioOutput(self.comfyui_audio_output)
+        self.comfyui_media_player.setVideoOutput(self.comfyui_video_widget)
+        self.comfyui_video_url = ""
+        video_actions = QHBoxLayout()
+        self.comfyui_open_video_button = QPushButton("Abrir vídeo")
+        self.comfyui_open_video_button.setEnabled(False)
+        self.comfyui_open_video_button.clicked.connect(self.open_comfyui_video)
+        video_actions.addWidget(self.comfyui_open_video_button)
+        video_actions.addStretch()
+        result_layout.addLayout(video_actions)
+        log_label = QLabel("Registro de vídeo")
+        log_label.setObjectName("section-title")
+        result_layout.addWidget(log_label)
+        self.comfyui_log = QPlainTextEdit()
+        self.comfyui_log.setReadOnly(True)
+        self.comfyui_log.setPlaceholderText("Aquí aparecerán las subidas, la cola y el render de ComfyUI...")
+        self.comfyui_log.setMaximumHeight(180)
+        self.comfyui_log.setStyleSheet("QPlainTextEdit { font-family: Consolas, monospace; font-size: 11px; }")
+        result_layout.addWidget(self.comfyui_log)
+
+        lora_card.setMinimumWidth(360)
+        layout.addWidget(settings_card, 30)
+        layout.addWidget(lora_card, 35)
+        layout.addWidget(result_card, 35)
+        return container
+
     def _render_minimax_preview_empty(self):
         self.minimax_preview_list.clear()
         item = QListWidgetItem()
@@ -1015,6 +1409,273 @@ class ModernApp(QMainWindow):
         if not paths:
             return
         self.add_minimax_images(paths)
+
+    def use_minimax_prompt_for_comfyui(self):
+        prompt = self.minimax_output.toPlainText().strip()
+        if not prompt:
+            QMessageBox.warning(self, "Sin prompt", "Genera o escribe un prompt antes de enviarlo a ComfyUI.")
+            return
+        self.comfyui_prompt.setPlainText(prompt)
+        self.selected_modal_images = list(self.selected_minimax_images)
+        self._render_modal_images()
+        self.statusBar().showMessage("Prompt y referencias preparados para ComfyUI Modal.")
+
+    def send_minimax_to_comfyui(self):
+        self.use_minimax_prompt_for_comfyui()
+        if self.comfyui_prompt.toPlainText().strip():
+            self.tabs.setCurrentIndex(2)
+
+    def select_modal_audios(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Selecciona audios de referencia",
+            "",
+            "Audios (*.wav *.mp3 *.m4a *.aac *.flac *.ogg)",
+        )
+        if not paths:
+            return
+        self.add_modal_audios(paths)
+
+    def add_modal_images(self, paths):
+        valid = self._normalize_image_paths(paths)
+        if not valid:
+            QMessageBox.warning(self, "Formato no válido", "Solo se aceptan imágenes PNG, JPG, JPEG, BMP o WEBP.")
+            return
+        self.selected_modal_images = list(dict.fromkeys(self.selected_modal_images + valid))
+        self._render_modal_images()
+
+    def select_modal_images(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Añadir imágenes de referencia",
+            "",
+            "Imágenes (*.png *.jpg *.jpeg *.bmp *.webp)",
+        )
+        if paths:
+            self.add_modal_images(paths)
+
+    def clear_modal_images(self):
+        self.selected_modal_images = []
+        self._render_modal_images()
+
+    def remove_modal_image(self, path):
+        if path in self.selected_modal_images:
+            self.selected_modal_images.remove(path)
+            self._render_modal_images()
+
+    def _render_modal_images(self):
+        if not hasattr(self, "comfyui_image_list"):
+            return
+        self.comfyui_image_list.clear()
+        for path in self.selected_modal_images:
+            try:
+                pixmap = self._pixmap_from_path(path, GalleryImageTile.TILE_SIZE)
+            except Exception:
+                pixmap = QPixmap()
+            tile = GalleryImageTile(path, pixmap)
+            tile.removed.connect(self.remove_modal_image)
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, path)
+            item.setSizeHint(tile.sizeHint())
+            self.comfyui_image_list.addItem(item)
+            self.comfyui_image_list.setItemWidget(item, tile)
+
+    def _sync_modal_image_order(self):
+        self.selected_modal_images = [
+            self.comfyui_image_list.item(index).data(Qt.UserRole)
+            for index in range(self.comfyui_image_list.count())
+            if self.comfyui_image_list.item(index).data(Qt.UserRole)
+        ]
+
+    def add_modal_audios(self, paths):
+        allowed = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"}
+        valid = [path for path in paths if os.path.splitext(path)[1].lower() in allowed]
+        if not valid:
+            QMessageBox.warning(self, "Formato no válido", "Solo se aceptan audios WAV, MP3, M4A, AAC, FLAC u OGG.")
+            return
+        self.selected_modal_audios = list(dict.fromkeys(self.selected_modal_audios + valid))
+        self._render_modal_audios()
+
+    def _render_modal_audios(self):
+        self.comfyui_audio_list.clear()
+        for path in self.selected_modal_audios:
+            item = QListWidgetItem(Path(path).name)
+            item.setData(Qt.UserRole, path)
+            item.setToolTip(path)
+            self.comfyui_audio_list.addItem(item)
+
+    def _sync_modal_audio_order(self):
+        self.selected_modal_audios = [
+            self.comfyui_audio_list.item(index).data(Qt.UserRole)
+            for index in range(self.comfyui_audio_list.count())
+        ]
+
+    def remove_selected_modal_audio(self):
+        item = self.comfyui_audio_list.currentItem()
+        if not item:
+            return
+        path = item.data(Qt.UserRole)
+        if path in self.selected_modal_audios:
+            self.selected_modal_audios.remove(path)
+        self._render_modal_audios()
+
+    def generate_comfyui_video(self):
+        if self.comfyui_render_thread and self.comfyui_render_thread.isRunning():
+            return
+        base_url = self.comfyui_modal_url.text().strip().rstrip("/")
+        prompt = self.comfyui_prompt.toPlainText().strip()
+        workflow_path = Path(self.comfyui_workflow.currentData() or "")
+        if not base_url.startswith(("https://", "http://")):
+            QMessageBox.warning(self, "URL no válida", "Introduce una URL HTTP o HTTPS válida para ComfyUI.")
+            return
+        if not prompt:
+            QMessageBox.warning(self, "Sin prompt", "Genera un prompt en MiniMax H3 o escríbelo en esta pestaña.")
+            return
+        if not self.selected_modal_images:
+            QMessageBox.warning(self, "Sin imágenes", "Añade al menos una imagen de referencia para el workflow.")
+            return
+        if not workflow_path.is_file():
+            QMessageBox.critical(self, "Workflow no encontrado", "Selecciona un workflow API válido.")
+            return
+        try:
+            with open(workflow_path, "r", encoding="utf-8") as file_handle:
+                workflow = json.load(file_handle)
+            required_nodes = {"4032", "4035", "4036", "4044", "4064"}
+            missing_nodes = sorted(required_nodes - set(workflow))
+            if missing_nodes:
+                raise ValueError(
+                    "Este workflow no usa el contrato de MiniMax H3 Ultra necesario "
+                    f"para prompt, referencias, duración, LoRAs y salida: faltan {', '.join(missing_nodes)}."
+                )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            QMessageBox.critical(self, "Workflow incompatible", str(exc))
+            return
+
+        selected_loras = [
+            (name, weight.value())
+            for name, (enabled, weight) in self.comfyui_lora_controls.items()
+            if enabled.isChecked()
+        ]
+        self.comfyui_render_button.setEnabled(False)
+        self.comfyui_render_status.setText("Preparando archivos...")
+        self.comfyui_log.clear()
+        self._append_comfyui_log(
+            f"Iniciando: {len(self.selected_modal_images)} imágenes, "
+            f"{len(self.selected_modal_audios)} audios y {len(selected_loras)} LoRAs."
+        )
+        self.comfyui_render_thread = QThread(self)
+        self.comfyui_render_worker = ComfyUIRenderWorker(
+            base_url,
+            workflow_path,
+            prompt,
+            self.comfyui_duration.value(),
+            list(self.selected_modal_images),
+            list(self.selected_modal_audios),
+            selected_loras,
+        )
+        self.comfyui_render_worker.moveToThread(self.comfyui_render_thread)
+        self.comfyui_render_thread.started.connect(self.comfyui_render_worker.run)
+        self.comfyui_render_worker.status.connect(self._handle_comfyui_render_status)
+        self.comfyui_render_worker.elapsed.connect(self._handle_comfyui_render_elapsed)
+        self.comfyui_render_worker.queued.connect(self._handle_comfyui_video_queued)
+        self.comfyui_render_worker.completed.connect(self._handle_comfyui_video_completed)
+        self.comfyui_render_worker.failed.connect(self._handle_comfyui_video_failed)
+        self.comfyui_render_worker.completed.connect(self.comfyui_render_thread.quit)
+        self.comfyui_render_worker.failed.connect(self.comfyui_render_thread.quit)
+        self.comfyui_render_thread.finished.connect(self.comfyui_render_worker.deleteLater)
+        self.comfyui_render_thread.finished.connect(self.comfyui_render_thread.deleteLater)
+        self.comfyui_render_thread.start()
+
+    def _handle_comfyui_video_queued(self, prompt_id):
+        self.comfyui_render_status.setText(f"Vídeo en cola: {prompt_id}")
+        self._append_comfyui_log(f"ComfyUI aceptó el trabajo: {prompt_id}")
+        self.statusBar().showMessage(f"ComfyUI aceptó el trabajo {prompt_id}.")
+
+    def _handle_comfyui_render_status(self, message):
+        self.comfyui_render_status.setText(message)
+        self._append_comfyui_log(message)
+
+    def _handle_comfyui_render_elapsed(self, elapsed_seconds):
+        minutes, seconds = divmod(elapsed_seconds, 60)
+        self.comfyui_render_status.setText(
+            f"Generando vídeo en ComfyUI... {minutes:02d}:{seconds:02d}"
+        )
+
+    def _handle_comfyui_video_completed(self, video_url):
+        self.comfyui_video_url = video_url
+        self.comfyui_media_player.setSource(QUrl(video_url))
+        self.comfyui_media_player.play()
+        self.comfyui_open_video_button.setEnabled(True)
+        self.comfyui_render_status.setText("Vídeo generado")
+        self.comfyui_render_button.setEnabled(True)
+        self._append_comfyui_log("Vídeo completado y cargado en el reproductor.")
+        self.statusBar().showMessage("Vídeo generado por ComfyUI Modal.")
+
+    def _handle_comfyui_video_failed(self, error_text):
+        self.comfyui_render_status.setText("No se pudo crear el vídeo")
+        self.comfyui_render_button.setEnabled(True)
+        self._append_comfyui_log(f"ERROR: {error_text}")
+        QMessageBox.critical(self, "Error al crear el vídeo", error_text)
+
+    def _append_comfyui_log(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.comfyui_log.appendPlainText(f"[{timestamp}] {message}")
+
+    def open_comfyui_video(self):
+        if self.comfyui_video_url:
+            QDesktopServices.openUrl(QUrl(self.comfyui_video_url))
+
+    def refresh_comfyui_loras(self):
+        if self.comfyui_catalog_thread and self.comfyui_catalog_thread.isRunning():
+            return
+        base_url = self.comfyui_modal_url.text().strip().rstrip("/")
+        if not base_url.startswith(("https://", "http://")):
+            QMessageBox.warning(self, "URL no válida", "Introduce una URL HTTP o HTTPS válida para ComfyUI.")
+            return
+
+        self.comfyui_refresh_button.setEnabled(False)
+        self.comfyui_connection_label.setText("Conectando con Modal...")
+        self.comfyui_catalog_thread = QThread(self)
+        self.comfyui_catalog_worker = ComfyUICatalogWorker(base_url)
+        self.comfyui_catalog_worker.moveToThread(self.comfyui_catalog_thread)
+        self.comfyui_catalog_thread.started.connect(self.comfyui_catalog_worker.run)
+        self.comfyui_catalog_worker.finished.connect(self._handle_comfyui_loras_loaded)
+        self.comfyui_catalog_worker.failed.connect(self._handle_comfyui_loras_failed)
+        self.comfyui_catalog_worker.finished.connect(self.comfyui_catalog_thread.quit)
+        self.comfyui_catalog_worker.failed.connect(self.comfyui_catalog_thread.quit)
+        self.comfyui_catalog_thread.finished.connect(self.comfyui_catalog_worker.deleteLater)
+        self.comfyui_catalog_thread.finished.connect(self.comfyui_catalog_thread.deleteLater)
+        self.comfyui_catalog_thread.start()
+
+    def _handle_comfyui_loras_loaded(self, base_url, loras):
+        self.comfyui_lora_list.clear()
+        self.comfyui_lora_controls = {}
+        for name in loras:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(8, 4, 8, 4)
+            enabled = QCheckBox(name)
+            weight = QDoubleSpinBox()
+            weight.setRange(-2.0, 2.0)
+            weight.setSingleStep(0.05)
+            weight.setValue(1.0)
+            weight.setDecimals(2)
+            weight.setFixedWidth(88)
+            row_layout.addWidget(enabled, 1)
+            row_layout.addWidget(weight)
+            item = QListWidgetItem()
+            item.setSizeHint(row.sizeHint())
+            self.comfyui_lora_list.addItem(item)
+            self.comfyui_lora_list.setItemWidget(item, row)
+            self.comfyui_lora_controls[name] = (enabled, weight)
+        self.comfyui_connection_label.setText(f"Conectado: {len(loras)} LoRAs disponibles")
+        self.comfyui_refresh_button.setEnabled(True)
+        self.statusBar().showMessage(f"ComfyUI Modal conectado en {base_url}.")
+
+    def _handle_comfyui_loras_failed(self, error_text):
+        self.comfyui_connection_label.setText("No se pudo conectar con Modal")
+        self.comfyui_refresh_button.setEnabled(True)
+        QMessageBox.critical(self, "Error de ComfyUI Modal", error_text)
 
     def remove_minimax_image(self, path):
         if path in self.selected_minimax_images:
