@@ -4,41 +4,6 @@
       "PowerLoraLoaderHeaderWidget": {
         "type": "PowerLoraLoaderHeaderWidget"
       },
-      "lora_1": {
-        "on": true,
-        "lora": "HMCumshot_V2.safetensors",
-        "strength": 0.9
-      },
-      "lora_2": {
-        "on": false,
-        "lora": "deepthroat_v02.safetensors",
-        "strength": 1
-      },
-      "lora_3": {
-        "on": true,
-        "lora": "MysticXXX_MMH3-V4.safetensors",
-        "strength": 0.8
-      },
-      "lora_4": {
-        "on": false,
-        "lora": "MM-H3 - Blowjob v2.1.safetensors",
-        "strength": 1
-      },
-      "lora_5": {
-        "on": false,
-        "lora": "h3-realism-people-t2v-i2v-r2v.safetensors",
-        "strength": 1
-      },
-      "lora_6": {
-        "on": false,
-        "lora": "H3_Deeper.safetensors",
-        "strength": 1
-      },
-      "lora_7": {
-        "on": false,
-        "lora": "HMNSFW_AIO_V2.safetensors",
-        "strength": 1
-      },
       "➕ Add Lora": "",
       "model": [
         "2415",
@@ -89,8 +54,8 @@
   },
   "2395": {
     "inputs": {
-      "aspect_ratio": "16:9 (Widescreen)",
-      "megapixels": 0.9,
+      "aspect_ratio": "4:3 (Standard)",
+      "megapixels": 1,
       "multiple": 32
     },
     "class_type": "ResolutionSelector",
@@ -154,7 +119,7 @@
   "2405": {
     "inputs": {
       "scheduler": "simple",
-      "steps": 8,
+      "steps": 20,
       "denoise": 1,
       "model": [
         "2393:2214",
@@ -209,7 +174,7 @@
   },
   "2412": {
     "inputs": {
-      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
       "type": "minimax",
       "device": "default"
     },
@@ -220,7 +185,7 @@
   },
   "2415": {
     "inputs": {
-      "unet_name": "DasiwaMinimaxH3_dasiwaHybrid8turboV1.safetensors",
+      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
       "weight_dtype": "default"
     },
     "class_type": "UNETLoader",
@@ -427,7 +392,7 @@
         0
       ],
       "images": [
-        "2396:2362",
+        "2396:2259",
         0
       ]
     },
@@ -561,25 +526,13 @@
       "title": "Cargar modelo de interpolación de fotogramas"
     }
   },
-  "2396:2362": {
-    "inputs": {
-      "value": [
-        "2396:2259",
-        0
-      ]
-    },
-    "class_type": "UnloadAllModels",
-    "_meta": {
-      "title": "UnloadAllModels"
-    }
-  },
   "2396:2358": {
     "inputs": {
       "denoise": false,
       "denoise_quality": "Ultra",
       "deblur": false,
       "deblur_quality": "Ultra",
-      "upscale": "VSR",
+      "upscale": "Off",
       "upscale_quality": "Ultra",
       "resize_type": "Scale",
       "scale": 2,
@@ -593,7 +546,7 @@
         1
       ],
       "divisible_by": "32",
-      "ratio_preset": "16:9",
+      "ratio_preset": "4:3",
       "resize_method": "Center Crop (Fill)",
       "device_id": 0,
       "empty_cache": false,

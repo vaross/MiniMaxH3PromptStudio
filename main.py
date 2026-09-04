@@ -72,15 +72,17 @@ def get_workflow_node_ids(workflow):
     }
     node_ids = {}
     for key, class_type in required_types.items():
-        node_id = next(
-            (node_id for node_id, node in workflow.items() if node.get("class_type") == class_type),
-            None,
-        )
+        node_id = next((
+            node_id
+            for node_id, node in workflow.items()
+            if node.get("class_type") == class_type
+            and (key != "output" or node.get("inputs", {}).get("save_output"))
+        ), None)
         if node_id is None:
+            if key == "output":
+                raise ValueError("El workflow no tiene una salida de vídeo persistente activada.")
             raise ValueError(f"Falta el nodo requerido: {class_type}.")
         node_ids[key] = node_id
-    if not workflow[node_ids["output"]]["inputs"].get("save_output"):
-        raise ValueError("El workflow no tiene una salida de vídeo persistente activada.")
     return node_ids
 
 
@@ -115,6 +117,40 @@ def save_minimax_history(entries):
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(entries, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def get_comfyui_loras_path():
+    base = os.getenv("APPDATA") or str(Path.home())
+    folder = Path(base) / "MiniMaxPromptStudio"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / "comfyui_loras.json"
+
+
+def get_comfyui_videos_dir():
+    downloads_dir = Path.home() / "Downloads"
+    folder = downloads_dir / "MiniMaxPromptStudio"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def load_comfyui_loras():
+    path = get_comfyui_loras_path()
+    if not path.exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            loras = json.load(f)
+        return loras if isinstance(loras, list) and all(isinstance(name, str) for name in loras) else []
+    except Exception:
+        return []
+
+
+def save_comfyui_loras(loras):
+    try:
+        with open(get_comfyui_loras_path(), "w", encoding="utf-8") as f:
+            json.dump(loras, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -754,7 +790,7 @@ class ComfyUIRenderWorker(QObject):
     status = Signal(str)
     elapsed = Signal(int)
     queued = Signal(str)
-    completed = Signal(str)
+    completed = Signal(str, str)
     failed = Signal(str)
 
     def __init__(self, base_url, workflow_path, prompt, duration, image_paths, audio_paths, loras):
@@ -783,6 +819,25 @@ class ComfyUIRenderWorker(QObject):
         if not name:
             raise ValueError(f"ComfyUI no confirmó la carga de {Path(path).name}.")
         return f"{subfolder}/{name}".lstrip("/")
+
+    def _download_video(self, video_url, filename):
+        suffix = Path(filename).suffix or ".mp4"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+        destination = get_comfyui_videos_dir() / f"MMH3 - {timestamp}{suffix}"
+        stem = destination.stem
+        counter = 1
+        while destination.exists():
+            destination = destination.with_name(f"{stem}_{counter}{suffix}")
+            counter += 1
+
+        self.status.emit(f"Descargando {destination.name}...")
+        with requests.get(video_url, stream=True, timeout=600) as response:
+            response.raise_for_status()
+            with open(destination, "wb") as file_handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        file_handle.write(chunk)
+        return str(destination)
 
     @Slot()
     def run(self):
@@ -867,7 +922,9 @@ class ComfyUIRenderWorker(QObject):
                                 "subfolder": file_info.get("subfolder", ""),
                                 "type": file_info.get("type", "output"),
                             })
-                            self.completed.emit(f"{self.base_url}/view?{query}")
+                            video_url = f"{self.base_url}/view?{query}"
+                            video_path = self._download_video(video_url, filename)
+                            self.completed.emit(video_url, video_path)
                             return
                 raise ValueError("ComfyUI completó el trabajo, pero no devolvió un archivo de vídeo.")
             if not generation_started:
@@ -1267,6 +1324,10 @@ class ModernApp(QMainWindow):
         self.comfyui_lora_list.setMaximumHeight(300)
         lora_layout.addWidget(self.comfyui_lora_list)
         self.comfyui_lora_controls = {}
+        cached_loras = load_comfyui_loras()
+        if cached_loras:
+            self._populate_comfyui_loras(cached_loras)
+            self.comfyui_connection_label.setText(f"Catálogo guardado: {len(cached_loras)} LoRAs")
 
         image_label = QLabel("Imágenes de referencia")
         image_label.setObjectName("section-title")
@@ -1322,11 +1383,15 @@ class ModernApp(QMainWindow):
         self.comfyui_media_player.setAudioOutput(self.comfyui_audio_output)
         self.comfyui_media_player.setVideoOutput(self.comfyui_video_widget)
         self.comfyui_video_url = ""
+        self.comfyui_video_path = ""
         video_actions = QHBoxLayout()
         self.comfyui_open_video_button = QPushButton("Abrir vídeo")
         self.comfyui_open_video_button.setEnabled(False)
         self.comfyui_open_video_button.clicked.connect(self.open_comfyui_video)
         video_actions.addWidget(self.comfyui_open_video_button)
+        open_downloads_button = QPushButton("Abrir descargas")
+        open_downloads_button.clicked.connect(self.open_comfyui_downloads)
+        video_actions.addWidget(open_downloads_button)
         video_actions.addStretch()
         result_layout.addLayout(video_actions)
         log_label = QLabel("Registro de vídeo")
@@ -1618,15 +1683,16 @@ class ModernApp(QMainWindow):
             f"Generando vídeo en ComfyUI... {minutes:02d}:{seconds:02d}"
         )
 
-    def _handle_comfyui_video_completed(self, video_url):
+    def _handle_comfyui_video_completed(self, video_url, video_path):
         self.comfyui_video_url = video_url
-        self.comfyui_media_player.setSource(QUrl(video_url))
+        self.comfyui_video_path = video_path
+        self.comfyui_media_player.setSource(QUrl.fromLocalFile(video_path))
         self.comfyui_media_player.play()
         self.comfyui_open_video_button.setEnabled(True)
-        self.comfyui_render_status.setText("Vídeo generado")
+        self.comfyui_render_status.setText("Vídeo descargado")
         self.comfyui_render_button.setEnabled(True)
-        self._append_comfyui_log("Vídeo completado y cargado en el reproductor.")
-        self.statusBar().showMessage("Vídeo generado por ComfyUI Modal.")
+        self._append_comfyui_log(f"Vídeo descargado: {video_path}")
+        self.statusBar().showMessage("Vídeo generado y descargado desde ComfyUI Modal.")
 
     def _handle_comfyui_video_failed(self, error_text):
         self.comfyui_render_status.setText("No se pudo crear el vídeo")
@@ -1639,8 +1705,11 @@ class ModernApp(QMainWindow):
         self.comfyui_log.appendPlainText(f"[{timestamp}] {message}")
 
     def open_comfyui_video(self):
-        if self.comfyui_video_url:
-            QDesktopServices.openUrl(QUrl(self.comfyui_video_url))
+        if self.comfyui_video_path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.comfyui_video_path))
+
+    def open_comfyui_downloads(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(get_comfyui_videos_dir())))
 
     def refresh_comfyui_loras(self):
         if self.comfyui_catalog_thread and self.comfyui_catalog_thread.isRunning():
@@ -1665,6 +1734,13 @@ class ModernApp(QMainWindow):
         self.comfyui_catalog_thread.start()
 
     def _handle_comfyui_loras_loaded(self, base_url, loras):
+        save_comfyui_loras(loras)
+        self._populate_comfyui_loras(loras)
+        self.comfyui_connection_label.setText(f"Conectado: {len(loras)} LoRAs disponibles")
+        self.comfyui_refresh_button.setEnabled(True)
+        self.statusBar().showMessage(f"ComfyUI Modal conectado en {base_url}.")
+
+    def _populate_comfyui_loras(self, loras):
         self.comfyui_lora_list.clear()
         self.comfyui_lora_controls = {}
         for name in loras:
@@ -1685,9 +1761,6 @@ class ModernApp(QMainWindow):
             self.comfyui_lora_list.addItem(item)
             self.comfyui_lora_list.setItemWidget(item, row)
             self.comfyui_lora_controls[name] = (enabled, weight)
-        self.comfyui_connection_label.setText(f"Conectado: {len(loras)} LoRAs disponibles")
-        self.comfyui_refresh_button.setEnabled(True)
-        self.statusBar().showMessage(f"ComfyUI Modal conectado en {base_url}.")
 
     def _handle_comfyui_loras_failed(self, error_text):
         self.comfyui_connection_label.setText("No se pudo conectar con Modal")
